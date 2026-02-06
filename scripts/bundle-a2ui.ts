@@ -19,18 +19,32 @@ const INPUT_PATHS = [
 ];
 
 async function walk(entryPath: string, files: string[]) {
+  let st: Awaited<ReturnType<typeof fs.lstat>>;
   try {
-    const st = await fs.stat(entryPath);
-    if (st.isDirectory()) {
-      const entries = await fs.readdir(entryPath);
-      for (const entry of entries) {
-        await walk(path.join(entryPath, entry), files);
-      }
-    } else {
-      files.push(entryPath);
+    st = await fs.lstat(entryPath);
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException;
+    if (err?.code === "ENOENT") {
+      return;
     }
-  } catch {
-    // Ignore missing files if any
+    throw error;
+  }
+  if (st.isDirectory()) {
+    let entries: string[];
+    try {
+      entries = await fs.readdir(entryPath);
+    } catch (error) {
+      const err = error as NodeJS.ErrnoException;
+      if (err?.code === "ENOENT") {
+        return;
+      }
+      throw error;
+    }
+    for (const entry of entries) {
+      await walk(path.join(entryPath, entry), files);
+    }
+  } else {
+    files.push(entryPath);
   }
 }
 
@@ -60,11 +74,13 @@ async function computeHash() {
 
 function run(command: string, args: string[]) {
   return new Promise<void>((resolve, reject) => {
-    const child = spawn(command, args, {
+    const resolvedCommand =
+      process.platform === "win32" && !command.endsWith(".cmd") ? `${command}.cmd` : command;
+    const child = spawn(resolvedCommand, args, {
       cwd: ROOT_DIR,
       stdio: "inherit",
-      shell: true,
     });
+    child.on("error", reject);
     child.on("close", (code) => {
       if (code === 0) {
         resolve();
@@ -98,15 +114,15 @@ async function main() {
     } catch {}
   }
 
-  console.log("Bundling A2UI...");
   try {
-    await run("pnpm", ["exec", "tsc", "-p", path.join(A2UI_RENDERER_DIR, "tsconfig.json")]);
-    await run("pnpm", ["exec", "rolldown", "-c", path.join(A2UI_APP_DIR, "rolldown.config.mjs")]);
+    await run("pnpm", ["-s", "exec", "tsc", "-p", path.join(A2UI_RENDERER_DIR, "tsconfig.json")]);
+    await run("rolldown", ["-c", path.join(A2UI_APP_DIR, "rolldown.config.mjs")]);
 
+    await fs.mkdir(path.dirname(HASH_FILE), { recursive: true });
     await fs.writeFile(HASH_FILE, currentHash);
-  } catch (e) {
-    console.error("A2UI bundling failed.");
-    console.error(e);
+  } catch {
+    console.error("A2UI bundling failed. Re-run with: pnpm canvas:a2ui:bundle");
+    console.error("If this persists, verify pnpm deps and try again.");
     process.exit(1);
   }
 }
