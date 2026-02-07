@@ -13,7 +13,6 @@ import {
   normalizeToolDefinitions,
   normalizeToolChoice,
   extractToolOutput,
-  parseTextModeToolCalls,
 } from "../tools/utils.js";
 import {
   setConversationId,
@@ -143,10 +142,9 @@ export async function handleChatCompletionProxyRequest(
     files: [],
   };
 
-  difyPayload.tool_call_mode =
-    typeof chatBody.tool_call_mode === "string" && chatBody.tool_call_mode.trim()
-      ? chatBody.tool_call_mode
-      : "openclaw_text";
+  // Ensure tool call mode is always handled by Dify's native capabilities
+  // We do not set 'openclaw_text' or other legacy modes here.
+  // difyPayload.tool_call_mode = "structured"; // Optional: explicit native mode if needed
 
   const normalizedTools = normalizeToolDefinitions(chatBody.tools);
   if (normalizedTools) {
@@ -232,11 +230,9 @@ export async function handleChatCompletionProxyRequest(
     const responseId = `chatcmpl-${Date.now()}`;
     const created = Math.floor(Date.now() / 1000);
     const autoToolLoop = false;
-    const enableTextToolParsing = difyPayload.tool_call_mode === "openclaw_text";
     let loopCount = 0;
     let roleSent = false;
     let currentPayload = difyPayload;
-    let accumulatedText = "";
 
     res.setHeader(HEADER_CONTENT_TYPE, "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
@@ -285,7 +281,6 @@ export async function handleChatCompletionProxyRequest(
       }
 
       let buffer = "";
-      let reachedEnd = false;
       const toolCallMap = new Map<
         string,
         { callId: string; toolName: string; argsString: string }
@@ -317,33 +312,19 @@ export async function handleChatCompletionProxyRequest(
               }
 
               const event = typeof data.event === "string" ? data.event : "";
-              if (event === "message_end") {
-                reachedEnd = true;
-                break;
-              }
 
               if (event === "message" || event === "agent_message") {
-                const content = typeof data.answer === "string" ? data.answer : "";
-                if (content) {
-                  accumulatedText += content;
-                }
+                // Keep track of answer content if needed, but we don't parse text tools anymore
+                // const content = typeof data.answer === "string" ? data.answer : "";
+                // if (content) {
+                //   accumulatedText += content;
+                // }
               }
 
-              let resolvedToolCalls = resolveDifyToolCalls(
+              const resolvedToolCalls = resolveDifyToolCalls(
                 data as Record<string, unknown>,
                 params.appType,
               );
-
-              if (
-                resolvedToolCalls.length === 0 &&
-                enableTextToolParsing &&
-                (event === "message" || event === "agent_message")
-              ) {
-                const textCalls = parseTextModeToolCalls(accumulatedText);
-                if (textCalls.length > 0) {
-                  resolvedToolCalls = textCalls;
-                }
-              }
 
               if (resolvedToolCalls.length > 0) {
                 for (const toolCall of resolvedToolCalls) {
@@ -411,9 +392,6 @@ export async function handleChatCompletionProxyRequest(
               console.warn("[dify-auth] Parse error:", e, "Line:", line);
             }
           }
-        }
-        if (reachedEnd) {
-          break;
         }
       }
 
