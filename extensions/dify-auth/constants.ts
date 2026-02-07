@@ -1,0 +1,10 @@
+export const PROVIDER_ID = "dify";
+export const PROVIDER_LABEL = "dify";
+export const PROXY_PATH = "/plugins/dify-auth/proxy";
+export const DEFAULT_BASE_URL = "https://api.dify.ai/v1";
+export const HEADER_AUTHORIZATION = "Authorization";
+export const HEADER_CONTENT_TYPE = "Content-Type";
+export const OPEN_RESPONSES_PATHS = ["/v1/responses", "/responses"] as const;
+export const MAX_TOOL_LOOPS = 5;
+export const CONVERSATION_TTL_MS = 30 * 60 * 1000;
+export const MAX_CONVERSATIONS = 1000;
