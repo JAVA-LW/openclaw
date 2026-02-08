@@ -35,7 +35,10 @@ export async function handleChatCompletionProxyRequest(
 ) {
   const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const logger = new DifyLogger(requestId);
-  logger.log("Incoming Request Body", params.body);
+  logger.log("Incoming Request", {
+    headers: req.headers, // Capture relevant headers for context
+    body: params.body,
+  });
 
   if (typeof params.body !== "object" || params.body === null) {
     res.statusCode = 400;
@@ -79,7 +82,8 @@ export async function handleChatCompletionProxyRequest(
       toolResults.push({ tool_call_id: toolCallId, output, is_error: result.is_error });
     }
   }
-  for (const message of messages) {
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
     if (!message || typeof message !== "object") {
       continue;
     }
@@ -88,11 +92,32 @@ export async function handleChatCompletionProxyRequest(
       continue;
     }
     console.log(`[DEBUG] Processing tool role message:`, message);
-    const toolCallId =
+    let toolCallId =
       (typeof message.tool_call_id === "string" && message.tool_call_id.trim()) ||
       (typeof message.toolCallId === "string" && message.toolCallId.trim()) ||
       (typeof message.toolUseId === "string" && message.toolUseId.trim()) ||
       "";
+
+    // Fix for legacy function messages without tool_call_id
+    if (
+      !toolCallId &&
+      message.role === "function" &&
+      typeof message.name === "string" &&
+      message.name
+    ) {
+      // Look backwards for a matching tool call
+      for (let j = i - 1; j >= 0; j--) {
+        const prev = messages[j] as any; // Cast to any to access tool_calls
+        if (prev.role === "assistant" && Array.isArray(prev.tool_calls)) {
+          const match = prev.tool_calls.find((tc: any) => tc.function?.name === message.name);
+          if (match && match.id) {
+            toolCallId = match.id;
+            break;
+          }
+        }
+      }
+    }
+
     if (!toolCallId) {
       console.warn(`[DEBUG] Tool message missing tool_call_id:`, message);
       continue;
@@ -100,7 +125,7 @@ export async function handleChatCompletionProxyRequest(
     const output = resolveToolResultOutput(message.content);
     toolResults.push({ tool_call_id: toolCallId, output });
   }
-  
+
   console.log(`[DEBUG] Extracted toolResults:`, JSON.stringify(toolResults));
 
   const lastMessageEntry = toolResults.length
@@ -276,7 +301,10 @@ export async function handleChatCompletionProxyRequest(
       logger.log(`Dify Request (Loop ${loopCount})`, {
         url: `${params.baseUrl}${endpoint}`,
         ...requestOptions,
-        body: currentPayload, // Log as object for readability
+        // Body is already in requestOptions as string, but we want object for readability.
+        // To avoid duplication and huge logs, we only log the object version if it's different from the initial payload
+        // or if it's a subsequent loop.
+        parsedBody: currentPayload,
       });
 
       const difyRes = await fetch(`${params.baseUrl}${endpoint}`, requestOptions);
@@ -366,22 +394,24 @@ export async function handleChatCompletionProxyRequest(
                     shouldEmit = true;
                   } else {
                     // Full state: Replace existing args
-                    
+
                     // Safety check: Don't overwrite existing valid args with empty/invalid ones
-                    const isNewEmpty = toolCall.argsString === "{}" || toolCall.argsString.trim() === "";
-                    const isExistingValid = existing && existing.argsString.length > 2 && existing.argsString !== "{}";
-                    
+                    const isNewEmpty =
+                      toolCall.argsString === "{}" || toolCall.argsString.trim() === "";
+                    const isExistingValid =
+                      existing && existing.argsString.length > 2 && existing.argsString !== "{}";
+
                     if (isNewEmpty && isExistingValid) {
-                        continue;
+                      continue;
                     }
 
                     toolCallMap.set(toolCall.callId, toolCall);
-                    
+
                     // Only emit if we haven't seen this tool call or it has no args yet
                     // This avoids duplicating args if we receive full state after deltas
                     if (!existing || !existing.argsString) {
-                        shouldEmit = true;
-                        argsToEmit = toolCall.argsString;
+                      shouldEmit = true;
+                      argsToEmit = toolCall.argsString;
                     }
                   }
 
