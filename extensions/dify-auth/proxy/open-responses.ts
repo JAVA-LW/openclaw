@@ -7,7 +7,6 @@ import { executeToolCalls } from "../tools/executor.js";
 import {
   resolveDifyToolCalls,
   stringifyToolOutput,
-  parseTextModeToolCalls,
 } from "../tools/utils.js";
 import {
   normalizeToolDefinitions,
@@ -115,7 +114,7 @@ export async function handleOpenResponsesProxyRequest(
 ) {
   const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const logger = new DifyLogger(requestId);
-  logger.log("Incoming OpenResponses Request Body", params.body);
+//   logger.log("Incoming OpenResponses Request Body", params.body);
 
   if (!params.body || typeof params.body !== "object") {
     res.statusCode = 400;
@@ -159,6 +158,7 @@ export async function handleOpenResponsesProxyRequest(
       }
       const type = (item as { type?: unknown }).type;
       if (type === "input_text") {
+        toolResults.length = 0;
         const text = (item as { text?: unknown }).text;
         if (typeof text === "string" && text.trim()) {
           inputTextParts.push(text);
@@ -166,6 +166,7 @@ export async function handleOpenResponsesProxyRequest(
         continue;
       }
       if (type === "input_image") {
+        toolResults.length = 0;
         inputImages.push(...extractOpenResponsesImages([item]));
         continue;
       }
@@ -198,6 +199,7 @@ export async function handleOpenResponsesProxyRequest(
             continue;
           }
         }
+        toolResults.length = 0;
         messageItems.push({ role: normalizedRole, content });
         continue;
       }
@@ -223,6 +225,7 @@ export async function handleOpenResponsesProxyRequest(
             continue;
           }
         }
+        toolResults.length = 0;
         messageItems.push({ role, content });
       }
     }
@@ -272,10 +275,9 @@ export async function handleOpenResponsesProxyRequest(
     files: [],
   };
 
-  difyPayload.tool_call_mode =
-    typeof payload.tool_call_mode === "string" && payload.tool_call_mode.trim()
-      ? payload.tool_call_mode
-      : "openclaw_text";
+  // Ensure tool call mode is always handled by Dify's native capabilities
+  // We do not set 'openclaw_text' or other legacy modes here.
+  // difyPayload.tool_call_mode = "structured"; // Optional: explicit native mode if needed
 
   if (!difyPayload.query && toolResults.length > 0) {
     const fallbackQuery = toolResults
@@ -307,6 +309,7 @@ export async function handleOpenResponsesProxyRequest(
   }
   if (toolResults.length > 0) {
     difyPayload.tool_results = toolResults;
+    console.log("[dify-auth] Sending tool_results to Dify:", JSON.stringify(toolResults, null, 2));
   }
   if (difyPayload.tools || typeof difyPayload.tool_choice !== "undefined") {
     const cached = toolCache.get(sessionKey);
@@ -396,7 +399,6 @@ export async function handleOpenResponsesProxyRequest(
     const model =
       typeof payload.model === "string" && payload.model.trim() ? payload.model : "dify-app";
     const autoToolLoop = false;
-    const enableTextToolParsing = difyPayload.tool_call_mode === "openclaw_text";
     let loopCount = 0;
     let accumulatedText = "";
     let currentPayload = difyPayload;
@@ -477,7 +479,6 @@ export async function handleOpenResponsesProxyRequest(
       }
 
       let buffer = "";
-      let reachedEnd = false;
       const toolCallMap = new Map<string, { callId: string; name: string; args: string }>();
 
       while (true) {
@@ -487,6 +488,12 @@ export async function handleOpenResponsesProxyRequest(
         }
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
+        
+        // Debug: Monitor buffer fragmentation
+        if (lines.length === 1 && buffer.length > 1000) {
+            console.warn(`[dify-auth] Large SSE buffer detected without newline (${buffer.length} chars). Potential fragmentation issue.`);
+        }
+
         buffer = lines.pop() || "";
 
         for (const line of lines) {
@@ -508,10 +515,6 @@ export async function handleOpenResponsesProxyRequest(
             }
 
             const event = typeof data.event === "string" ? data.event : "";
-            if (event === "message_end") {
-              reachedEnd = true;
-              break;
-            }
 
             if (event === "message" || event === "agent_message") {
               const content = typeof data.answer === "string" ? data.answer : "";
@@ -547,40 +550,48 @@ export async function handleOpenResponsesProxyRequest(
               return;
             }
 
-            let resolvedToolCalls = resolveDifyToolCalls(
+            const resolvedToolCalls = resolveDifyToolCalls(
               data as Record<string, unknown>,
               params.appType,
             );
 
-            if (
-              resolvedToolCalls.length === 0 &&
-              enableTextToolParsing &&
-              (event === "message" || event === "agent_message")
-            ) {
-              const textCalls = parseTextModeToolCalls(accumulatedText);
-              if (textCalls.length > 0) {
-                resolvedToolCalls = textCalls;
-              }
-            }
-
             if (resolvedToolCalls.length > 0) {
               for (const toolCall of resolvedToolCalls) {
                 const existing = toolCallMap.get(toolCall.callId);
-                if (!existing || existing.args.length < toolCall.argsString.length) {
-                  toolCallMap.set(toolCall.callId, {
-                    callId: toolCall.callId,
-                    name: toolCall.toolName,
-                    args: toolCall.argsString,
-                  });
+                
+                if (toolCall.isDelta) {
+                    // Delta: Append to existing args
+                    const currentArgs = existing ? existing.args : "";
+                    toolCallMap.set(toolCall.callId, {
+                        callId: toolCall.callId,
+                        name: toolCall.toolName,
+                        args: currentArgs + toolCall.argsString,
+                    });
+                } else {
+                    // Full state: Replace existing args
+                    
+                    // Safety check: Don't overwrite existing valid args with empty/invalid ones
+                    // This prevents node_finished (if parsing fails) from clearing partial args collected from messages
+                    const isNewEmpty = toolCall.argsString === "{}" || toolCall.argsString.trim() === "";
+                    const isExistingValid = existing && existing.args.length > 2 && existing.args !== "{}";
+                    
+                    if (isNewEmpty && isExistingValid) {
+                        continue;
+                    }
+
+                    if (!existing || existing.args.length < toolCall.argsString.length) {
+                      toolCallMap.set(toolCall.callId, {
+                        callId: toolCall.callId,
+                        name: toolCall.toolName,
+                        args: toolCall.argsString,
+                      });
+                    }
                 }
               }
             }
           } catch {
             continue;
           }
-        }
-        if (reachedEnd) {
-          break;
         }
       }
 

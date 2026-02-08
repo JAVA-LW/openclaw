@@ -1,9 +1,9 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { DifyPayload } from "../dify/types.js";
-import { HEADER_AUTHORIZATION, HEADER_CONTENT_TYPE, MAX_TOOL_LOOPS } from "../constants.js";
-import { uploadToDify } from "../dify/client.js";
-import { toolCache } from "../tools/cache.js";
-import { executeToolCalls } from "../tools/executor.js";
+import type { DifyPayload } from "../dify/types";
+import { HEADER_AUTHORIZATION, HEADER_CONTENT_TYPE, MAX_TOOL_LOOPS } from "../constants";
+import { uploadToDify } from "../dify/client";
+import { toolCache } from "../tools/cache";
+import { executeToolCalls } from "../tools/executor";
 import {
   resolveDifyToolCalls,
   stringifyToolOutput,
@@ -13,15 +13,15 @@ import {
   normalizeToolDefinitions,
   normalizeToolChoice,
   extractToolOutput,
-} from "../tools/utils.js";
+} from "../tools/utils";
 import {
   setConversationId,
   getConversationId,
   pruneConversationMap,
   deleteConversation,
-} from "../utils/conversation.js";
-import { DifyLogger } from "../utils/logger.js";
-import { transformEvent } from "./stream.js";
+} from "../utils/conversation";
+import { DifyLogger } from "../utils/logger";
+import { transformEvent } from "./stream";
 
 export async function handleChatCompletionProxyRequest(
   req: IncomingMessage,
@@ -84,19 +84,24 @@ export async function handleChatCompletionProxyRequest(
       continue;
     }
     if (!isToolRole(message.role)) {
+      console.log(`[DEBUG] Skipping message with role: ${message.role} (not a tool role)`);
       continue;
     }
+    console.log(`[DEBUG] Processing tool role message:`, message);
     const toolCallId =
       (typeof message.tool_call_id === "string" && message.tool_call_id.trim()) ||
       (typeof message.toolCallId === "string" && message.toolCallId.trim()) ||
       (typeof message.toolUseId === "string" && message.toolUseId.trim()) ||
       "";
     if (!toolCallId) {
+      console.warn(`[DEBUG] Tool message missing tool_call_id:`, message);
       continue;
     }
     const output = resolveToolResultOutput(message.content);
     toolResults.push({ tool_call_id: toolCallId, output });
   }
+  
+  console.log(`[DEBUG] Extracted toolResults:`, JSON.stringify(toolResults));
 
   const lastMessageEntry = toolResults.length
     ? messages.toReversed().find((message) => !isToolRole(message.role))
@@ -166,20 +171,6 @@ export async function handleChatCompletionProxyRequest(
       difyPayload.tool_choice = cached.tool_choice;
     }
   }
-  if (toolResults.length > 0) {
-    difyPayload.tool_results = toolResults;
-  }
-  if (difyPayload.tools || typeof difyPayload.tool_choice !== "undefined") {
-    const cached = toolCache.get(sessionKey);
-    toolCache.set(sessionKey, {
-      tools: difyPayload.tools ?? cached?.tools,
-      tool_choice:
-        typeof difyPayload.tool_choice !== "undefined"
-          ? difyPayload.tool_choice
-          : cached?.tool_choice,
-    });
-  }
-
   if (Array.isArray(lastMessage)) {
     const textPart = lastMessage.find((p) => p.type === "text");
     if (textPart?.text) {
@@ -216,7 +207,39 @@ export async function handleChatCompletionProxyRequest(
     }
   } else {
     const textValue = String(lastMessage);
-    difyPayload.query = toolResultPrefix ? `${toolResultPrefix}\n${textValue}` : textValue;
+    // Only set query from lastMessage if it's not empty, or if query is currently empty
+    // This prevents overwriting a query that might have been set by other logic (though currently none before this)
+    if (textValue || !difyPayload.query) {
+      difyPayload.query = toolResultPrefix ? `${toolResultPrefix}\n${textValue}` : textValue;
+    }
+  }
+
+  // Final check: If we have tool results but query is empty (because lastMessage was empty/null),
+  // use the tool outputs as the query.
+  if (toolResults.length > 0) {
+    difyPayload.tool_results = toolResults;
+    if (!difyPayload.query || difyPayload.query.trim() === "") {
+      console.log(`[DEBUG] Query is empty, auto-filling with tool results...`);
+      const combinedOutput = toolResults
+        .map((r) => `[Tool Result: ${r.tool_call_id}] ${r.output}`)
+        .join("\n\n");
+      difyPayload.query = combinedOutput || ".";
+      console.log(`[DEBUG] Auto-filled query:`, difyPayload.query);
+    }
+  } else if (!difyPayload.query) {
+    difyPayload.query = ".";
+    console.log(`[DEBUG] Query empty (no tool results), filled with dot.`);
+  }
+
+  if (difyPayload.tools || typeof difyPayload.tool_choice !== "undefined") {
+    const cached = toolCache.get(sessionKey);
+    toolCache.set(sessionKey, {
+      tools: difyPayload.tools ?? cached?.tools,
+      tool_choice:
+        typeof difyPayload.tool_choice !== "undefined"
+          ? difyPayload.tool_choice
+          : cached?.tool_choice,
+    });
   }
 
   if (!conversationId && systemMessage && typeof difyPayload.query === "string") {
@@ -329,45 +352,72 @@ export async function handleChatCompletionProxyRequest(
               if (resolvedToolCalls.length > 0) {
                 for (const toolCall of resolvedToolCalls) {
                   const existing = toolCallMap.get(toolCall.callId);
-                  // Only emit if it's new or updated (e.g. args grew)
-                  // With stable IDs, this prevents re-emitting the same tool call multiple times
-                  if (!existing || existing.argsString.length < toolCall.argsString.length) {
-                    toolCallMap.set(toolCall.callId, toolCall);
+                  let shouldEmit = false;
+                  let argsToEmit = "";
 
-                    if (!autoToolLoop) {
-                      // Calculate index based on all unique calls so far
-                      const allCalls = Array.from(toolCallMap.values());
-                      const toolCallIndex = allCalls.findIndex((c) => c.callId === toolCall.callId);
-
-                      const chunk = {
-                        id: responseId,
-                        object: "chat.completion.chunk",
-                        created,
-                        model: "dify-app",
-                        choices: [
-                          {
-                            index: 0,
-                            delta: {
-                              ...(roleSent ? {} : { role: "assistant" }),
-                              tool_calls: [
-                                {
-                                  index: toolCallIndex,
-                                  id: toolCall.callId,
-                                  type: "function",
-                                  function: {
-                                    name: toolCall.toolName,
-                                    arguments: toolCall.argsString,
-                                  },
-                                },
-                              ],
-                            },
-                            finish_reason: null,
-                          },
-                        ],
-                      };
-                      roleSent = true;
-                      res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+                  if (toolCall.isDelta) {
+                    // Delta: Append to existing args
+                    const currentArgs = existing ? existing.argsString : "";
+                    argsToEmit = toolCall.argsString;
+                    toolCallMap.set(toolCall.callId, {
+                      ...toolCall,
+                      argsString: currentArgs + toolCall.argsString,
+                    });
+                    shouldEmit = true;
+                  } else {
+                    // Full state: Replace existing args
+                    
+                    // Safety check: Don't overwrite existing valid args with empty/invalid ones
+                    const isNewEmpty = toolCall.argsString === "{}" || toolCall.argsString.trim() === "";
+                    const isExistingValid = existing && existing.argsString.length > 2 && existing.argsString !== "{}";
+                    
+                    if (isNewEmpty && isExistingValid) {
+                        continue;
                     }
+
+                    toolCallMap.set(toolCall.callId, toolCall);
+                    
+                    // Only emit if we haven't seen this tool call or it has no args yet
+                    // This avoids duplicating args if we receive full state after deltas
+                    if (!existing || !existing.argsString) {
+                        shouldEmit = true;
+                        argsToEmit = toolCall.argsString;
+                    }
+                  }
+
+                  if (shouldEmit && !autoToolLoop) {
+                    // Calculate index based on all unique calls so far
+                    const allCalls = Array.from(toolCallMap.values());
+                    const toolCallIndex = allCalls.findIndex((c) => c.callId === toolCall.callId);
+
+                    const chunk = {
+                      id: responseId,
+                      object: "chat.completion.chunk",
+                      created,
+                      model: "dify-app",
+                      choices: [
+                        {
+                          index: 0,
+                          delta: {
+                            ...(roleSent ? {} : { role: "assistant" }),
+                            tool_calls: [
+                              {
+                                index: toolCallIndex,
+                                id: toolCall.callId,
+                                type: "function",
+                                function: {
+                                  name: toolCall.toolName,
+                                  arguments: argsToEmit,
+                                },
+                              },
+                            ],
+                          },
+                          finish_reason: null,
+                        },
+                      ],
+                    };
+                    roleSent = true;
+                    res.write(`data: ${JSON.stringify(chunk)}\n\n`);
                   }
                 }
               }

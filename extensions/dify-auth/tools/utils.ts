@@ -1,5 +1,11 @@
-export const resolveToolArguments = (input: unknown) => {
+export const resolveToolArguments = (input: unknown, allowEmptyString = false) => {
   if (typeof input === "string") {
+    // For deltas, we want to preserve empty strings or whitespace if needed, 
+    // but usually args are JSON fragments. 
+    // If allowEmptyString is true, we return the raw string (even if empty).
+    if (allowEmptyString) {
+        return input;
+    }
     const trimmed = input.trim();
     return trimmed.length > 0 ? trimmed : "{}";
   }
@@ -38,12 +44,13 @@ export const buildToolCall = (params: {
   toolName: unknown;
   args: unknown;
   candidates: Array<unknown>;
+  allowEmptyArgs?: boolean;
 }) => {
   const toolName = typeof params.toolName === "string" ? params.toolName.trim() : "";
   if (!toolName) {
     return null;
   }
-  const argsString = resolveToolArguments(params.args);
+  const argsString = resolveToolArguments(params.args, params.allowEmptyArgs);
   let callId = "";
   for (const candidate of params.candidates) {
     callId = resolveToolCallId(candidate);
@@ -189,7 +196,7 @@ export const extractToolOutput = (result: unknown) => {
 
 export const isToolRole = (role?: string) => {
   const normalized = role?.toLowerCase() ?? "";
-  return normalized === "tool" || normalized === "tool_result" || normalized === "toolresult";
+  return normalized === "tool" || normalized === "tool_result" || normalized === "toolresult" || normalized === "function";
 };
 
 export const resolveToolResultPrefix = (message: {
@@ -230,116 +237,38 @@ export const parseToolArgs = (argsString: string) => {
   }
 };
 
-// Simple string hash for stable IDs
-const simpleHash = (str: string) => {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i);
-    hash = (hash << 5) - hash + char;
-    hash = hash & hash; // Convert to 32bit integer
-  }
-  return Math.abs(hash).toString(36);
-};
-
-export const parseTextModeToolCalls = (text: string) => {
-  const toolCalls: Array<{ toolName: string; argsString: string; callId: string }> = [];
-  const regex = /```(?:python|py)?\s*([\s\S]*?)```/g;
-  let match;
-  while ((match = regex.exec(text)) !== null) {
-    const code = match[1].trim();
-    // Support both single-line and multi-line calls
-    // First, try to match function calls across newlines
-    const callRegex = /([a-zA-Z0-9_]+)\s*\(([\s\S]*?)\)/g;
-    let callMatch;
-    while ((callMatch = callRegex.exec(code)) !== null) {
-      const toolName = callMatch[1];
-      const rawArgs = callMatch[2].trim().replace(/\n/g, " "); // Flatten newlines for easier regex matching
-      let argsString = "{}";
-
-      // Try to parse args
-      // 1. Check for single string arg: "value" or 'value'
-      const singleStringMatch = /^["'](.*)["']$/.exec(rawArgs);
-      if (singleStringMatch) {
-        argsString = JSON.stringify({ input: singleStringMatch[1] });
-      } else {
-        // 2. Try to naive parse key=value
-        try {
-          const props: string[] = [];
-          const argRegex =
-            /([a-zA-Z0-9_]+)\s*=\s*(?:([0-9]+(?:\.[0-9]+)?)|"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|(True|False|None))/g;
-
-          let argMatch;
-          let hasMatch = false;
-
-          while ((argMatch = argRegex.exec(rawArgs)) !== null) {
-            hasMatch = true;
-            const key = argMatch[1];
-            const numVal = argMatch[2];
-            const doubleQuotedVal = argMatch[3];
-            const singleQuotedVal = argMatch[4];
-            const boolVal = argMatch[5];
-
-            if (numVal !== undefined) {
-              props.push(`"${key}":${numVal}`);
-            } else if (doubleQuotedVal !== undefined) {
-              props.push(`"${key}":"${doubleQuotedVal}"`);
-            } else if (singleQuotedVal !== undefined) {
-              const escaped = singleQuotedVal.replace(/"/g, '\\"');
-              props.push(`"${key}":"${escaped}"`);
-            } else if (boolVal !== undefined) {
-              const map: Record<string, string> = { True: "true", False: "false", None: "null" };
-              props.push(`"${key}":${map[boolVal]}`);
-            }
-          }
-
-          if (hasMatch) {
-            argsString = "{" + props.join(",") + "}";
-            JSON.parse(argsString); // Validate
-          } else {
-            // Fallback
-            const naiveJson =
-              "{" + rawArgs.replace(/([a-zA-Z0-9_]+)=/g, '"$1":').replace(/'/g, '"') + "}";
-            JSON.parse(naiveJson);
-            argsString = naiveJson;
-          }
-        } catch {
-          argsString = JSON.stringify({ input: rawArgs });
-        }
-      }
-
-      // Fix: Map single 'input' argument to tool-specific parameter name
-      const TOOL_ARG_MAPPING: Record<string, string> = {
-        read: "path",
-        exec: "command",
-        web_search: "query",
-        web_fetch: "url",
-        memory_search: "query",
-      };
-
-      try {
-        const args = JSON.parse(argsString);
-        const keys = Object.keys(args);
-        if (keys.length === 1 && keys[0] === "input" && TOOL_ARG_MAPPING[toolName]) {
-          const val = args["input"];
-          argsString = JSON.stringify({ [TOOL_ARG_MAPPING[toolName]]: val });
-        }
-      } catch {}
-
-      const stableId = `call_${simpleHash(toolName + argsString)}`;
-
-      toolCalls.push({
-        toolName,
-        argsString,
-        callId: stableId,
-      });
-    }
-  }
-  return toolCalls;
-};
-
 export const resolveDifyToolCalls = (data: Record<string, unknown>, _appType: "chat" | "agent") => {
   const event = typeof data.event === "string" ? data.event : "";
-  const toolCalls: Array<{ toolName: string; argsString: string; callId: string }> = [];
+  const toolCalls: Array<{ toolName: string; argsString: string; callId: string; isDelta: boolean }> = [];
+  
+  // Log incoming data for debugging
+  if (event === "node_finished" || event === "message" || event === "agent_message") {
+     if (JSON.stringify(data).includes("tool_calls") || JSON.stringify(data).includes("toolCalls")) {
+         console.log(`[dify-auth] Resolving tool calls for event ${event}:`, JSON.stringify(data, null, 2));
+         try {
+            // Write to a log file for easier inspection
+            const fs = require('fs');
+            const path = require('path');
+            const logDir = path.join(__dirname, '..', 'logs');
+            if (!fs.existsSync(logDir)) {
+                fs.mkdirSync(logDir, { recursive: true });
+            }
+            const logPath = path.join(logDir, 'dify_tool_calls_debug.log');
+            const logEntry = `[${new Date().toISOString()}] Event: ${event}\nData: ${JSON.stringify(data, null, 2)}\n----------------------------------------\n`;
+            fs.appendFileSync(logPath, logEntry);
+
+             if (event === "node_finished") {
+                 const outputs = (data.data as any)?.outputs;
+                 if (outputs?.tool_calls) {
+                     console.log(`[dify-auth] Raw tool_calls in outputs:`, JSON.stringify(outputs.tool_calls, null, 2));
+                 }
+             }
+         } catch (e) {
+             console.error("[dify-auth] Error logging raw tool calls:", e);
+         }
+     }
+  }
+
   if (event === "agent_thought") {
     const toolCall = buildToolCall({
       toolName: data.tool,
@@ -347,7 +276,7 @@ export const resolveDifyToolCalls = (data: Record<string, unknown>, _appType: "c
       candidates: [data.tool_call_id, data.id, data.task_id],
     });
     if (toolCall) {
-      toolCalls.push(toolCall);
+      toolCalls.push({ ...toolCall, isDelta: false });
     }
     return toolCalls;
   }
@@ -356,11 +285,51 @@ export const resolveDifyToolCalls = (data: Record<string, unknown>, _appType: "c
       toolName: data.name,
       args: data.arguments,
       candidates: [data.tool_call_id, data.task_id],
+      allowEmptyArgs: true,
     });
     if (toolCall) {
-      toolCalls.push(toolCall);
+      // Dify sends tool_call as streaming deltas
+      toolCalls.push({ ...toolCall, isDelta: true });
     }
     return toolCalls;
+  }
+  if (event === "node_finished") {
+    const dataObj = data.data as { outputs?: { tool_calls?: unknown[] } } | undefined;
+    const outputs = dataObj?.outputs;
+    if (outputs?.tool_calls && Array.isArray(outputs.tool_calls)) {
+      console.log(`[dify-auth] Processing node_finished tool_calls:`, JSON.stringify(outputs.tool_calls));
+      for (const call of outputs.tool_calls) {
+        if (!call || typeof call !== "object") {
+          continue;
+        }
+        const safeCall = call as any;
+        let func = safeCall.function ?? safeCall.function_call;
+        if (typeof func === "string") {
+            try {
+                func = JSON.parse(func);
+            } catch (e) {
+                console.warn("[dify-auth] Failed to parse function property:", e);
+            }
+        }
+        
+        const toolName = func?.name ?? safeCall.name;
+        // Enhanced args lookup including func.args and func.parameters
+        const args = func?.arguments ?? func?.args ?? func?.parameters ?? 
+                     safeCall.arguments ?? safeCall.args ?? safeCall.parameters;
+
+        console.log(`[dify-auth] Extracted args for ${toolName}:`, typeof args === 'object' ? JSON.stringify(args) : args);
+
+        const toolCall = buildToolCall({
+          toolName: toolName,
+          args: args,
+          candidates: [safeCall.id, safeCall.call_id, safeCall.tool_call_id],
+        });
+        if (toolCall) {
+          // node_finished contains full tool call
+          toolCalls.push({ ...toolCall, isDelta: false });
+        }
+      }
+    }
   }
   if (event === "message" || event === "agent_message") {
     const calls = (data.tool_calls ?? data.toolCalls) as Array<Record<string, unknown>> | undefined;
@@ -369,14 +338,28 @@ export const resolveDifyToolCalls = (data: Record<string, unknown>, _appType: "c
         if (!call || typeof call !== "object") {
           continue;
         }
-        const func = (call.function ?? call.function_call) as Record<string, unknown> | undefined;
+        const safeCall = call as any;
+        let func = safeCall.function ?? safeCall.function_call;
+        if (typeof func === "string") {
+            try {
+                func = JSON.parse(func);
+            } catch (e) {
+                console.warn("[dify-auth] Failed to parse function property in message event:", e);
+            }
+        }
+        const toolName = func?.name ?? safeCall.name;
+        // Enhanced args lookup for message events too
+        const args = func?.arguments ?? func?.args ?? func?.parameters ?? 
+                     safeCall.arguments ?? safeCall.args ?? safeCall.parameters;
+
         const toolCall = buildToolCall({
-          toolName: func?.name ?? call.name,
-          args: func?.arguments ?? call.arguments,
-          candidates: [call.id, call.call_id, call.tool_call_id],
+          toolName: toolName,
+          args: args,
+          candidates: [safeCall.id, safeCall.call_id, safeCall.tool_call_id],
         });
         if (toolCall) {
-          toolCalls.push(toolCall);
+          // message events usually contain full tool calls
+          toolCalls.push({ ...toolCall, isDelta: false });
         }
       }
     }

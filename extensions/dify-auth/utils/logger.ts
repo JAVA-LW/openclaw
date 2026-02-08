@@ -26,8 +26,15 @@ export class DifyLogger {
 
   log(section: string, data: any) {
     try {
+      const replacer = (key: string, value: any) => {
+        if (key === "description" && typeof value === "string" && value.length > 50) {
+          return value.substring(0, 50) + "... (truncated)";
+        }
+        return value;
+      };
+
       const entry = `\n[${new Date().toISOString()}] === ${section} ===\n${
-        typeof data === "string" ? data : JSON.stringify(data, null, 2)
+        typeof data === "string" ? data : JSON.stringify(data, replacer, 2)
       }\n`;
       fs.appendFileSync(this.logFile, entry, "utf8");
     } catch (error) {
