@@ -27,10 +27,9 @@ export class DifyLogger {
   log(section: string, data: any) {
     try {
       const replacer = (key: string, value: any) => {
-        // Remove truncation to capture full context for reproduction
-        // if (key === "description" && typeof value === "string" && value.length > 50) {
-        //   return value.substring(0, 50) + "... (truncated)";
-        // }
+        if (key === "description" && typeof value === "string" && value.length > 50) {
+          return value.substring(0, 50) + "... (truncated)";
+        }
         return value;
       };
 

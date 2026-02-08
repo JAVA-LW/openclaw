@@ -35,10 +35,7 @@ export async function handleChatCompletionProxyRequest(
 ) {
   const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const logger = new DifyLogger(requestId);
-  logger.log("Incoming Request", {
-    headers: req.headers, // Capture relevant headers for context
-    body: params.body,
-  });
+  logger.log("Incoming Request Body", params.body);
 
   if (typeof params.body !== "object" || params.body === null) {
     res.statusCode = 400;
