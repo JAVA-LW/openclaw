@@ -264,6 +264,171 @@ async function runTest() {
   } catch (error) {
     console.error("Test Case 10 execution failed:", error);
   }
+
+  // --- Case 11: Full Multi-turn Simulation from Logs ---
+  console.log("\n--- Case 11: Full Multi-turn Simulation from Logs ---");
+
+  // Define the tool calls from the log
+  const TOOL_CALL_1_ID = "call_00_9maVwWBDpHOEAxWuShUM31fP";
+  const TOOL_CALL_2_ID = "call_00_X5fv3skZsa9OZKRss2xFHgEr";
+  const USER_QUERY =
+    "[Sun 2026-02-08 21:57 GMT+8] C:\\Users\\Lw\\.local 帮我看看这目录下有什么\n[message_id: 89bcdefc-306b-4f80-90ec-f5285d681195]";
+
+  // Helper to run a request
+  const runRequest = async (messages: any[], stepName: string) => {
+    console.log(`\n[Case 11] Running ${stepName}...`);
+    const { req, res } = createMockReqRes();
+    const requestBody = {
+      model: "dify-app",
+      user: "openclaw-user",
+      messages: messages,
+    };
+
+    try {
+      await handleChatCompletionProxyRequest(req, res, {
+        apiKey: DIFY_API_KEY,
+        baseUrl: DIFY_BASE_URL,
+        appType: "chat",
+        body: requestBody,
+      });
+      console.log(`[Case 11] ${stepName} finished.`);
+    } catch (error) {
+      console.error(`[Case 11] ${stepName} failed:`, error);
+    }
+  };
+
+  // Override fetch to simulate the Dify state machine based on input
+  global.fetch = async (url: RequestInfo | URL, options?: RequestInit) => {
+    if (options?.body) {
+      const body = JSON.parse(options.body as string);
+      console.log(
+        `[MockFetch] Dify Request Body (Partial): tool_results count=${body.tool_results?.length || 0}`,
+      );
+
+      // Step 1: Initial Query -> Returns Tool Call 1
+      if (!body.tool_results || body.tool_results.length === 0) {
+        console.log("[MockFetch] Returning Tool Call 1");
+        const event1 = {
+          event: "node_finished",
+          conversation_id: "c0e0f16f-9feb-4350-89c3-4d15b6a4cc16",
+          data: {
+            outputs: {
+              tool_calls: [
+                {
+                  id: TOOL_CALL_1_ID,
+                  type: "function",
+                  function: {
+                    name: "exec",
+                    arguments: '{"command": "dir \\"C:\\\\Users\\\\Lw\\\\.local\\""}',
+                  },
+                },
+              ],
+            },
+          },
+        };
+        return new Response(`data: ${JSON.stringify(event1)}\n\n`, { status: 200 });
+      }
+
+      // Step 2: First Tool Result Submitted -> Returns Tool Call 2 (Simulating duplicate/re-run)
+      if (body.tool_results && body.tool_results.length === 1) {
+        const res = body.tool_results[0];
+        if (res.tool_call_id === TOOL_CALL_1_ID) {
+          console.log("[MockFetch] Received Result 1, Returning Tool Call 2");
+          const event2 = {
+            event: "node_finished",
+            conversation_id: "c0e0f16f-9feb-4350-89c3-4d15b6a4cc16",
+            data: {
+              outputs: {
+                tool_calls: [
+                  {
+                    id: TOOL_CALL_2_ID,
+                    type: "function",
+                    function: {
+                      name: "exec",
+                      arguments: '{"command": "dir \\"C:\\\\Users\\\\Lw\\\\.local\\""}',
+                    },
+                  },
+                ],
+              },
+            },
+          };
+          return new Response(`data: ${JSON.stringify(event2)}\n\n`, { status: 200 });
+        }
+      }
+
+      // Step 3: Second Tool Result Submitted -> Returns 400 Error
+      if (body.tool_results && body.tool_results.length === 2) {
+        console.log("[MockFetch] Received Result 1 & 2, Simulating 400 Error");
+        return new Response(
+          JSON.stringify({
+            error: {
+              message:
+                "An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. (insufficient tool messages following tool_calls message)",
+              code: "invalid_request_error",
+            },
+          }),
+          { status: 400 },
+        );
+      }
+    }
+    return new Response("OK", { status: 200 });
+  };
+
+  // --- Step 1: Initial Request ---
+  const messages1 = [{ role: "user", content: USER_QUERY }];
+  await runRequest(messages1, "Step 1 (Initial)");
+
+  // --- Step 2: Submit Result 1 ---
+  const messages2 = [
+    { role: "user", content: USER_QUERY },
+    {
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        {
+          id: TOOL_CALL_1_ID,
+          type: "function",
+          function: {
+            name: "exec",
+            arguments: '{"command": "dir \\"C:\\\\Users\\\\Lw\\\\.local\\""}',
+          },
+        },
+      ],
+    },
+    {
+      role: "tool",
+      tool_call_id: TOOL_CALL_1_ID,
+      name: "exec",
+      content: "Directory listing 1...",
+    },
+  ];
+  await runRequest(messages2, "Step 2 (Submit Result 1)");
+
+  // --- Step 3: Submit Result 2 (Trigger Error) ---
+  const messages3 = [
+    ...messages2,
+    {
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        {
+          id: TOOL_CALL_2_ID,
+          type: "function",
+          function: {
+            name: "exec",
+            arguments: '{"command": "dir \\"C:\\\\Users\\\\Lw\\\\.local\\""}',
+          },
+        },
+      ],
+    },
+    {
+      role: "tool",
+      tool_call_id: TOOL_CALL_2_ID,
+      name: "exec",
+      content: "Directory listing 2...",
+    },
+  ];
+  await runRequest(messages3, "Step 3 (Submit Result 2)");
 }
 
 runTest().catch(console.error);
