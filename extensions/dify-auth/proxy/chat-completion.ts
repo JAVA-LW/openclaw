@@ -243,13 +243,14 @@ export async function handleChatCompletionProxyRequest(
     }
   }
 
-  // When tool_results are present, ALWAYS override query with a minimal placeholder.
-  // Dify sets query=None in the LLM node when external_tool_results exist (node.py L242-243),
-  // but the query is still saved as a user message in conversation history.
-  // Using a short placeholder avoids polluting history with redundant tool output text.
+  // When tool_results are present, Dify's LLM node sets query=None internally,
+  // but the query is still saved to Message.query in conversation history.
+  // Use a meaningful summary so future turns can see what the tools returned.
   if (toolResults.length > 0) {
     difyPayload.tool_results = toolResults;
-    difyPayload.query = ".";
+    difyPayload.query = toolResults
+      .map((r) => `[${r.tool_call_id}] ${r.output.slice(0, 200)}`)
+      .join("\n");
   } else if (!difyPayload.query) {
     difyPayload.query = ".";
   }
@@ -270,6 +271,35 @@ export async function handleChatCompletionProxyRequest(
   }
 
   logger.log("Constructed Dify Payload", difyPayload);
+
+  // Intercept openclaw compaction/summary requests — these should never be
+  // forwarded to Dify because they can arrive while the last assistant message
+  // still has pending tool_calls, causing "tool_calls must be followed by tool
+  // messages" errors.  Return an empty successful response instead.
+  const isSummaryRequest =
+    typeof difyPayload.query === "string" &&
+    (difyPayload.query.includes("<previous-summary>") ||
+      difyPayload.query.includes("Create a structured context checkpoint summary"));
+  if (isSummaryRequest) {
+    logger.log("Blocked summary/compaction request", { query: difyPayload.query.slice(0, 120) });
+    res.setHeader(HEADER_CONTENT_TYPE, "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    const responseId = `chatcmpl-${Date.now()}`;
+    const created = Math.floor(Date.now() / 1000);
+    res.write(
+      `data: ${JSON.stringify({
+        id: responseId,
+        object: "chat.completion.chunk",
+        created,
+        model: "dify-app",
+        choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: "stop" }],
+      })}\n\n`,
+    );
+    res.write("data: [DONE]\n\n");
+    res.end();
+    return;
+  }
 
   try {
     const endpoint = "/chat-messages";

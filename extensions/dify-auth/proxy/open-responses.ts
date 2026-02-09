@@ -263,26 +263,22 @@ export async function handleOpenResponsesProxyRequest(
     toolCache.delete(sessionKey);
   }
 
+  // When tool_results are present, Dify's LLM node sets query=None internally
+  // and appends ToolPromptMessages. However the query value is still saved to
+  // Message.query in conversation history. Use a meaningful summary so that
+  // future turns can see what the tools returned.
+  const toolResultQuery =
+    toolResults.length > 0
+      ? toolResults.map((r) => `[${r.tool_call_id}] ${r.output.slice(0, 200)}`).join("\n")
+      : "";
   const difyPayload: DifyPayload = {
     inputs: {},
-    query: query || "",
+    query: toolResultQuery || query || "",
     response_mode: "streaming",
     conversation_id: conversationId,
     user: userId,
     files: [],
   };
-
-  // Ensure tool call mode is always handled by Dify's native capabilities
-  // We do not set 'openclaw_text' or other legacy modes here.
-  // difyPayload.tool_call_mode = "structured"; // Optional: explicit native mode if needed
-
-  if (!difyPayload.query && toolResults.length > 0) {
-    const fallbackQuery = toolResults
-      .map((result) => (typeof result.output === "string" ? result.output.trim() : ""))
-      .filter(Boolean)
-      .join("\n\n");
-    difyPayload.query = fallbackQuery || "tool_result";
-  }
 
   const normalizedTools = normalizeToolDefinitions(payload.tools);
   if (normalizedTools) {
@@ -383,6 +379,59 @@ export async function handleOpenResponsesProxyRequest(
     difyPayload.query = difyPayload.query
       ? `${systemMessage}\n\n${difyPayload.query}`
       : systemMessage;
+  }
+
+  // Intercept openclaw compaction/summary requests — these should never be
+  // forwarded to Dify because they can arrive while the last assistant message
+  // still has pending tool_calls, causing "tool_calls must be followed by tool
+  // messages" errors.  Return an empty successful response instead.
+  const isSummaryRequest =
+    typeof difyPayload.query === "string" &&
+    (difyPayload.query.includes("<previous-summary>") ||
+      difyPayload.query.includes("Create a structured context checkpoint summary"));
+  if (isSummaryRequest) {
+    logger.log("Blocked summary/compaction request", { query: difyPayload.query.slice(0, 120) });
+    const streamEnabled = payload.stream !== false;
+    if (streamEnabled) {
+      res.setHeader(HEADER_CONTENT_TYPE, "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      const emptyResponse = createOpenResponsesResource({
+        id: `response_${Date.now()}`,
+        model:
+          typeof payload.model === "string" && payload.model.trim() ? payload.model : "dify-app",
+        status: "completed",
+        output: [
+          createOpenResponsesMessageItem({
+            id: `msg_${Date.now()}`,
+            text: "",
+            status: "completed",
+          }),
+        ],
+      });
+      writeOpenResponsesEvent(res, { type: "response.completed", response: emptyResponse });
+      res.write("data: [DONE]\n\n");
+      res.end();
+    } else {
+      res.setHeader(HEADER_CONTENT_TYPE, "application/json");
+      res.end(
+        JSON.stringify(
+          createOpenResponsesResource({
+            id: `response_${Date.now()}`,
+            model: "dify-app",
+            status: "completed",
+            output: [
+              createOpenResponsesMessageItem({
+                id: `msg_${Date.now()}`,
+                text: "",
+                status: "completed",
+              }),
+            ],
+          }),
+        ),
+      );
+    }
+    return;
   }
 
   console.log("[dify-auth] Request payload:", JSON.stringify(difyPayload, null, 2));
