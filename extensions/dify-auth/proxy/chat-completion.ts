@@ -4,6 +4,7 @@ import { HEADER_AUTHORIZATION, HEADER_CONTENT_TYPE, MAX_TOOL_LOOPS } from "../co
 import { uploadToDify } from "../dify/client";
 import { toolCache } from "../tools/cache";
 import { executeToolCalls } from "../tools/executor";
+import { cacheSummary, popSummary } from "../tools/summary-cache";
 import {
   resolveDifyToolCalls,
   stringifyToolOutput,
@@ -248,12 +249,7 @@ export async function handleChatCompletionProxyRequest(
   // Use a meaningful summary so future turns can see what the tools returned.
   if (toolResults.length > 0) {
     difyPayload.tool_results = toolResults;
-    difyPayload.query = toolResults
-      .map((r) => {
-        const out = r.output.length > 2000 ? r.output.slice(0, 2000) + "...(truncated)" : r.output;
-        return `[${r.tool_call_id}] ${out}`;
-      })
-      .join("\n");
+    difyPayload.query = toolResults.map((r) => `[${r.tool_call_id}] ${r.output}`).join("\n");
   } else if (!difyPayload.query) {
     difyPayload.query = ".";
   }
@@ -284,7 +280,9 @@ export async function handleChatCompletionProxyRequest(
     (difyPayload.query.includes("<previous-summary>") ||
       difyPayload.query.includes("Create a structured context checkpoint summary"));
   if (isSummaryRequest) {
-    logger.log("Blocked summary/compaction request", { query: difyPayload.query.slice(0, 120) });
+    logger.log("Deferred summary/compaction request", { query: difyPayload.query.slice(0, 120) });
+    // Cache the summary request to be sent after the tool-call loop completes
+    cacheSummary(conversationId, difyPayload.query);
     res.setHeader(HEADER_CONTENT_TYPE, "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
@@ -312,6 +310,7 @@ export async function handleChatCompletionProxyRequest(
     let loopCount = 0;
     let roleSent = false;
     let currentPayload = difyPayload;
+    let lastHadToolCalls = false;
 
     res.setHeader(HEADER_CONTENT_TYPE, "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
@@ -507,6 +506,7 @@ export async function handleChatCompletionProxyRequest(
       }
 
       const pendingToolCalls = Array.from(toolCallMap.values());
+      lastHadToolCalls = pendingToolCalls.length > 0;
       if (autoToolLoop && pendingToolCalls.length > 0) {
         if (loopCount >= MAX_TOOL_LOOPS) {
           res.write(
@@ -565,6 +565,33 @@ export async function handleChatCompletionProxyRequest(
       }
 
       break;
+    }
+
+    // After tool-call loop completes (no pending tool_calls), flush any cached
+    // summary/compaction request so it gets stored in Dify conversation history.
+    if (!lastHadToolCalls && conversationId) {
+      const deferredSummary = popSummary(conversationId);
+      if (deferredSummary) {
+        logger.log("Flushing deferred summary", {
+          conversationId,
+          query: deferredSummary.slice(0, 120),
+        });
+        fetch(`${params.baseUrl}/chat-messages`, {
+          method: "POST",
+          headers: {
+            [HEADER_AUTHORIZATION]: `Bearer ${params.apiKey}`,
+            [HEADER_CONTENT_TYPE]: "application/json",
+          },
+          body: JSON.stringify({
+            inputs: {},
+            query: deferredSummary,
+            response_mode: "blocking",
+            conversation_id: conversationId,
+            user: userId,
+            files: [],
+          }),
+        }).catch((err) => logger.log("Deferred summary flush error", err));
+      }
     }
 
     res.write("data: [DONE]\n\n");
