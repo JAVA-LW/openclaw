@@ -26,9 +26,36 @@ export class DifyLogger {
 
   log(section: string, data: any) {
     try {
-      const replacer = (key: string, value: any) => {
+      // Use a regular function to access 'this' (the parent object)
+      const replacer = function (this: any, key: string, value: any) {
+        // Truncate long descriptions
         if (key === "description" && typeof value === "string" && value.length > 50) {
           return value.substring(0, 50) + "... (truncated)";
+        }
+
+        // Truncate long content/message/query fields (e.g. system prompts, user messages)
+        // BUT preserve assistant messages and tool outputs for debugging
+        if (
+          (key === "content" || key === "message" || key === "query") &&
+          typeof value === "string" &&
+          value.length > 200
+        ) {
+          // Check role in the parent object (this)
+          const role = this?.role;
+          // If it's an assistant response or tool result, keep it fully visible
+          if (role === "assistant" || role === "tool") {
+            return value;
+          }
+          // Otherwise (system, user, or unknown), truncate it
+          return value.substring(0, 200) + "... (truncated)";
+        }
+
+        // Compress tools array (definitions) if it's too long
+        if (key === "tools" && Array.isArray(value) && value.length > 3) {
+          return `[Array(${value.length}) - Truncated for brevity. Tool names: ${value
+            .map((t: any) => t.function?.name || t.name)
+            .slice(0, 5)
+            .join(", ")}...]`;
         }
         return value;
       };
