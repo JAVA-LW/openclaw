@@ -78,4 +78,5 @@ docs/taichuy/*
 memory/
 .agent/*.json
 !.agent/workflows/
-extensions/dify-auth/logs/*
+extensions/dify-auth/logs
+extensions/dify-auth/test
