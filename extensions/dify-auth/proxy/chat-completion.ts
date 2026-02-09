@@ -249,7 +249,10 @@ export async function handleChatCompletionProxyRequest(
   if (toolResults.length > 0) {
     difyPayload.tool_results = toolResults;
     difyPayload.query = toolResults
-      .map((r) => `[${r.tool_call_id}] ${r.output.slice(0, 200)}`)
+      .map((r) => {
+        const out = r.output.length > 2000 ? r.output.slice(0, 2000) + "...(truncated)" : r.output;
+        return `[${r.tool_call_id}] ${out}`;
+      })
       .join("\n");
   } else if (!difyPayload.query) {
     difyPayload.query = ".";

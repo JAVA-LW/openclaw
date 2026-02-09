@@ -269,7 +269,13 @@ export async function handleOpenResponsesProxyRequest(
   // future turns can see what the tools returned.
   const toolResultQuery =
     toolResults.length > 0
-      ? toolResults.map((r) => `[${r.tool_call_id}] ${r.output.slice(0, 200)}`).join("\n")
+      ? toolResults
+          .map((r) => {
+            const out =
+              r.output.length > 2000 ? r.output.slice(0, 2000) + "...(truncated)" : r.output;
+            return `[${r.tool_call_id}] ${out}`;
+          })
+          .join("\n")
       : "";
   const difyPayload: DifyPayload = {
     inputs: {},
