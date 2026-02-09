@@ -64,41 +64,8 @@ export function transformEvent(difyData: DifyResponseEvent) {
   let content = "";
 
   if (event === "tool_call") {
-    const data = (difyData as any).data;
-    if (data && data.tool_call_chunks) {
-      let chunks;
-      try {
-        chunks = JSON.parse(data.tool_call_chunks);
-      } catch (e) {
-        return null;
-      }
-
-      if (Array.isArray(chunks)) {
-        const tool_calls = chunks.map((chunk) => ({
-          index: chunk.index,
-          id: chunk.id,
-          type: "function",
-          function: {
-            name: chunk.function.name,
-            arguments: chunk.function.arguments,
-          },
-        }));
-
-        return {
-          id: "chatcmpl-" + (difyData.task_id || "id"),
-          object: "chat.completion.chunk",
-          created: Math.floor(Date.now() / 1000),
-          model: "dify-app",
-          choices: [
-            {
-              index: 0,
-              delta: { tool_calls },
-              finish_reason: null,
-            },
-          ],
-        };
-      }
-    }
+    // tool_call events are handled by the custom emission logic in chat-completion.ts
+    // Returning a chunk here would cause double emission to the client
     return null;
   } else if (event === "message" || event === "agent_message") {
     content = difyData.answer || "";

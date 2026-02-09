@@ -4,10 +4,7 @@ import { HEADER_AUTHORIZATION, HEADER_CONTENT_TYPE, MAX_TOOL_LOOPS } from "../co
 import { uploadBase64ToDify } from "../dify/client.js";
 import { toolCache } from "../tools/cache.js";
 import { executeToolCalls } from "../tools/executor.js";
-import {
-  resolveDifyToolCalls,
-  stringifyToolOutput,
-} from "../tools/utils.js";
+import { resolveDifyToolCalls, stringifyToolOutput } from "../tools/utils.js";
 import {
   normalizeToolDefinitions,
   normalizeToolChoice,
@@ -114,7 +111,7 @@ export async function handleOpenResponsesProxyRequest(
 ) {
   const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const logger = new DifyLogger(requestId);
-//   logger.log("Incoming OpenResponses Request Body", params.body);
+  //   logger.log("Incoming OpenResponses Request Body", params.body);
 
   if (!params.body || typeof params.body !== "object") {
     res.statusCode = 400;
@@ -488,10 +485,12 @@ export async function handleOpenResponsesProxyRequest(
         }
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
-        
+
         // Debug: Monitor buffer fragmentation
         if (lines.length === 1 && buffer.length > 1000) {
-            console.warn(`[dify-auth] Large SSE buffer detected without newline (${buffer.length} chars). Potential fragmentation issue.`);
+          console.warn(
+            `[dify-auth] Large SSE buffer detected without newline (${buffer.length} chars). Potential fragmentation issue.`,
+          );
         }
 
         buffer = lines.pop() || "";
@@ -558,34 +557,36 @@ export async function handleOpenResponsesProxyRequest(
             if (resolvedToolCalls.length > 0) {
               for (const toolCall of resolvedToolCalls) {
                 const existing = toolCallMap.get(toolCall.callId);
-                
-                if (toolCall.isDelta) {
-                    // Delta: Append to existing args
-                    const currentArgs = existing ? existing.args : "";
-                    toolCallMap.set(toolCall.callId, {
-                        callId: toolCall.callId,
-                        name: toolCall.toolName,
-                        args: currentArgs + toolCall.argsString,
-                    });
-                } else {
-                    // Full state: Replace existing args
-                    
-                    // Safety check: Don't overwrite existing valid args with empty/invalid ones
-                    // This prevents node_finished (if parsing fails) from clearing partial args collected from messages
-                    const isNewEmpty = toolCall.argsString === "{}" || toolCall.argsString.trim() === "";
-                    const isExistingValid = existing && existing.args.length > 2 && existing.args !== "{}";
-                    
-                    if (isNewEmpty && isExistingValid) {
-                        continue;
-                    }
 
-                    if (!existing || existing.args.length < toolCall.argsString.length) {
-                      toolCallMap.set(toolCall.callId, {
-                        callId: toolCall.callId,
-                        name: toolCall.toolName,
-                        args: toolCall.argsString,
-                      });
-                    }
+                if (toolCall.isDelta) {
+                  // Delta: Append to existing args
+                  const currentArgs = existing ? existing.args : "";
+                  toolCallMap.set(toolCall.callId, {
+                    callId: toolCall.callId,
+                    name: toolCall.toolName,
+                    args: currentArgs + toolCall.argsString,
+                  });
+                } else {
+                  // Full state: Replace existing args
+
+                  // Safety check: Don't overwrite existing valid args with empty/invalid ones
+                  // This prevents node_finished (if parsing fails) from clearing partial args collected from messages
+                  const isNewEmpty =
+                    toolCall.argsString === "{}" || toolCall.argsString.trim() === "";
+                  const isExistingValid =
+                    existing && existing.args.length > 2 && existing.args !== "{}";
+
+                  if (isNewEmpty && isExistingValid) {
+                    continue;
+                  }
+
+                  if (!existing || existing.args.length < toolCall.argsString.length) {
+                    toolCallMap.set(toolCall.callId, {
+                      callId: toolCall.callId,
+                      name: toolCall.toolName,
+                      args: toolCall.argsString,
+                    });
+                  }
                 }
               }
             }
@@ -716,6 +717,8 @@ export async function handleOpenResponsesProxyRequest(
     const finalOutputItems = [completedItem];
 
     // Emit function calls if present and not auto-executed
+    // Pi SDK requires the full event sequence: output_item.added → function_call_arguments.delta
+    // → function_call_arguments.done → output_item.done for arguments to be parsed correctly.
     if (!autoToolLoop && lastToolCalls.length > 0) {
       lastToolCalls.forEach((toolCall, index) => {
         const itemIndex = index + 1;
@@ -732,14 +735,32 @@ export async function handleOpenResponsesProxyRequest(
           output_index: itemIndex,
           item: fcItem,
         });
+        writeOpenResponsesEvent(res, {
+          type: "response.function_call_arguments.delta",
+          item_id: fcItem.id,
+          output_index: itemIndex,
+          delta: toolCall.args,
+        });
+        writeOpenResponsesEvent(res, {
+          type: "response.function_call_arguments.done",
+          item_id: fcItem.id,
+          output_index: itemIndex,
+          arguments: toolCall.args,
+        });
+        writeOpenResponsesEvent(res, {
+          type: "response.output_item.done",
+          output_index: itemIndex,
+          item: fcItem,
+        });
         finalOutputItems.push(fcItem);
       });
     }
 
+    const hasToolCalls = !autoToolLoop && lastToolCalls.length > 0;
     const response = createOpenResponsesResource({
       id: responseId,
       model,
-      status: "completed",
+      status: hasToolCalls ? "incomplete" : "completed",
       output: finalOutputItems,
     });
     writeOpenResponsesEvent(res, { type: "response.completed", response });

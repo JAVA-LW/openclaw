@@ -1,13 +1,35 @@
 export const resolveToolArguments = (input: unknown, allowEmptyString = false) => {
+  if (input === null || input === undefined) {
+    return allowEmptyString ? "" : "{}";
+  }
   if (typeof input === "string") {
-    // For deltas, we want to preserve empty strings or whitespace if needed, 
-    // but usually args are JSON fragments. 
-    // If allowEmptyString is true, we return the raw string (even if empty).
-    if (allowEmptyString) {
-        return input;
-    }
+    if (allowEmptyString && input === "") return input; // For deltas
+
     const trimmed = input.trim();
-    return trimmed.length > 0 ? trimmed : "{}";
+    if (trimmed.length === 0) return allowEmptyString ? "" : "{}";
+
+    // Try standard JSON parse first
+    try {
+      const parsed = JSON.parse(trimmed);
+      return JSON.stringify(parsed);
+    } catch {
+      // Fallback: Try to fix Python-style single quotes
+      // This is a common issue with DeepSeek models via Dify
+      try {
+        // 1. Replace single quotes around keys: {'key': -> {"key":
+        let fixed = trimmed.replace(/([{,]\s*)'([a-zA-Z0-9_]+)'(\s*:)/g, '$1"$2"$3');
+        // 2. Replace single quotes around simple string values: : 'value' -> : "value"
+        // Note: This is risky for values containing escaped quotes, but handles simple cases
+        fixed = fixed.replace(/:\s*'([^']*)'/g, ': "$1"');
+
+        const parsed = JSON.parse(fixed);
+        return JSON.stringify(parsed);
+      } catch {
+        // If still invalid, return original trimmed string
+        // Client might fail to parse, but we can't do much more safely
+        return trimmed;
+      }
+    }
   }
   return JSON.stringify(input ?? {});
 };
@@ -196,7 +218,12 @@ export const extractToolOutput = (result: unknown) => {
 
 export const isToolRole = (role?: string) => {
   const normalized = role?.toLowerCase() ?? "";
-  return normalized === "tool" || normalized === "tool_result" || normalized === "toolresult" || normalized === "function";
+  return (
+    normalized === "tool" ||
+    normalized === "tool_result" ||
+    normalized === "toolresult" ||
+    normalized === "function"
+  );
 };
 
 export const resolveToolResultPrefix = (message: {
@@ -239,35 +266,12 @@ export const parseToolArgs = (argsString: string) => {
 
 export const resolveDifyToolCalls = (data: Record<string, unknown>, _appType: "chat" | "agent") => {
   const event = typeof data.event === "string" ? data.event : "";
-  const toolCalls: Array<{ toolName: string; argsString: string; callId: string; isDelta: boolean }> = [];
-  
-  // Log incoming data for debugging
-  if (event === "node_finished" || event === "message" || event === "agent_message") {
-     if (JSON.stringify(data).includes("tool_calls") || JSON.stringify(data).includes("toolCalls")) {
-         console.log(`[dify-auth] Resolving tool calls for event ${event}:`, JSON.stringify(data, null, 2));
-         try {
-            // Write to a log file for easier inspection
-            const fs = require('fs');
-            const path = require('path');
-            const logDir = path.join(__dirname, '..', 'logs');
-            if (!fs.existsSync(logDir)) {
-                fs.mkdirSync(logDir, { recursive: true });
-            }
-            const logPath = path.join(logDir, 'dify_tool_calls_debug.log');
-            const logEntry = `[${new Date().toISOString()}] Event: ${event}\nData: ${JSON.stringify(data, null, 2)}\n----------------------------------------\n`;
-            fs.appendFileSync(logPath, logEntry);
-
-             if (event === "node_finished") {
-                 const outputs = (data.data as any)?.outputs;
-                 if (outputs?.tool_calls) {
-                     console.log(`[dify-auth] Raw tool_calls in outputs:`, JSON.stringify(outputs.tool_calls, null, 2));
-                 }
-             }
-         } catch (e) {
-             console.error("[dify-auth] Error logging raw tool calls:", e);
-         }
-     }
-  }
+  const toolCalls: Array<{
+    toolName: string;
+    argsString: string;
+    callId: string;
+    isDelta: boolean;
+  }> = [];
 
   if (event === "agent_thought") {
     const toolCall = buildToolCall({
@@ -281,6 +285,39 @@ export const resolveDifyToolCalls = (data: Record<string, unknown>, _appType: "c
     return toolCalls;
   }
   if (event === "tool_call") {
+    // Dify chatflow sends tool_call events with data.tool_call_chunks (JSON string array)
+    const dataObj = data.data as { tool_call_chunks?: unknown } | undefined;
+    const chunksRaw = dataObj?.tool_call_chunks ?? data.tool_call_chunks;
+    if (chunksRaw) {
+      let chunks: unknown[];
+      if (typeof chunksRaw === "string") {
+        try {
+          chunks = JSON.parse(chunksRaw);
+        } catch {
+          chunks = [];
+        }
+      } else if (Array.isArray(chunksRaw)) {
+        chunks = chunksRaw;
+      } else {
+        chunks = [];
+      }
+      for (const chunk of chunks) {
+        if (!chunk || typeof chunk !== "object") continue;
+        const c = chunk as any;
+        const func = c.function;
+        const toolCall = buildToolCall({
+          toolName: func?.name ?? c.name,
+          args: func?.arguments ?? c.arguments,
+          candidates: [c.id, c.tool_call_id, data.task_id],
+          allowEmptyArgs: true,
+        });
+        if (toolCall) {
+          toolCalls.push({ ...toolCall, isDelta: true });
+        }
+      }
+      if (toolCalls.length > 0) return toolCalls;
+    }
+    // Fallback: flat format (name/arguments at top level)
     const toolCall = buildToolCall({
       toolName: data.name,
       args: data.arguments,
@@ -288,7 +325,6 @@ export const resolveDifyToolCalls = (data: Record<string, unknown>, _appType: "c
       allowEmptyArgs: true,
     });
     if (toolCall) {
-      // Dify sends tool_call as streaming deltas
       toolCalls.push({ ...toolCall, isDelta: true });
     }
     return toolCalls;
@@ -297,7 +333,6 @@ export const resolveDifyToolCalls = (data: Record<string, unknown>, _appType: "c
     const dataObj = data.data as { outputs?: { tool_calls?: unknown[] } } | undefined;
     const outputs = dataObj?.outputs;
     if (outputs?.tool_calls && Array.isArray(outputs.tool_calls)) {
-      console.log(`[dify-auth] Processing node_finished tool_calls:`, JSON.stringify(outputs.tool_calls));
       for (const call of outputs.tool_calls) {
         if (!call || typeof call !== "object") {
           continue;
@@ -305,19 +340,21 @@ export const resolveDifyToolCalls = (data: Record<string, unknown>, _appType: "c
         const safeCall = call as any;
         let func = safeCall.function ?? safeCall.function_call;
         if (typeof func === "string") {
-            try {
-                func = JSON.parse(func);
-            } catch (e) {
-                console.warn("[dify-auth] Failed to parse function property:", e);
-            }
+          try {
+            func = JSON.parse(func);
+          } catch {
+            // ignore parse failures
+          }
         }
-        
-        const toolName = func?.name ?? safeCall.name;
-        // Enhanced args lookup including func.args and func.parameters
-        const args = func?.arguments ?? func?.args ?? func?.parameters ?? 
-                     safeCall.arguments ?? safeCall.args ?? safeCall.parameters;
 
-        console.log(`[dify-auth] Extracted args for ${toolName}:`, typeof args === 'object' ? JSON.stringify(args) : args);
+        const toolName = func?.name ?? safeCall.name;
+        const args =
+          func?.arguments ??
+          func?.args ??
+          func?.parameters ??
+          safeCall.arguments ??
+          safeCall.args ??
+          safeCall.parameters;
 
         const toolCall = buildToolCall({
           toolName: toolName,
@@ -341,16 +378,21 @@ export const resolveDifyToolCalls = (data: Record<string, unknown>, _appType: "c
         const safeCall = call as any;
         let func = safeCall.function ?? safeCall.function_call;
         if (typeof func === "string") {
-            try {
-                func = JSON.parse(func);
-            } catch (e) {
-                console.warn("[dify-auth] Failed to parse function property in message event:", e);
-            }
+          try {
+            func = JSON.parse(func);
+          } catch {
+            // ignore parse failures
+          }
         }
         const toolName = func?.name ?? safeCall.name;
         // Enhanced args lookup for message events too
-        const args = func?.arguments ?? func?.args ?? func?.parameters ?? 
-                     safeCall.arguments ?? safeCall.args ?? safeCall.parameters;
+        const args =
+          func?.arguments ??
+          func?.args ??
+          func?.parameters ??
+          safeCall.arguments ??
+          safeCall.args ??
+          safeCall.parameters;
 
         const toolCall = buildToolCall({
           toolName: toolName,

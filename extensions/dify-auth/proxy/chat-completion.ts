@@ -79,16 +79,22 @@ export async function handleChatCompletionProxyRequest(
       toolResults.push({ tool_call_id: toolCallId, output, is_error: result.is_error });
     }
   }
+  const hasExplicitToolResults = toolResults.length > 0;
   for (let i = 0; i < messages.length; i++) {
     const message = messages[i];
     if (!message || typeof message !== "object") {
       continue;
     }
     if (!isToolRole(message.role)) {
-      console.log(`[DEBUG] Skipping message with role: ${message.role} (not a tool role)`);
+      // If we encounter a non-tool message (like 'user' or 'assistant'),
+      // it means any previous tool results in the history belong to a completed turn.
+      // Dify is stateful, so we should not resend old tool results.
+      // We clear the accumulated tool results to ensure we only send the latest pending ones.
+      if (!hasExplicitToolResults && toolResults.length > 0) {
+        toolResults.length = 0;
+      }
       continue;
     }
-    console.log(`[DEBUG] Processing tool role message:`, message);
     let toolCallId =
       (typeof message.tool_call_id === "string" && message.tool_call_id.trim()) ||
       (typeof message.toolCallId === "string" && message.toolCallId.trim()) ||
@@ -116,18 +122,13 @@ export async function handleChatCompletionProxyRequest(
     }
 
     if (!toolCallId) {
-      console.warn(`[DEBUG] Tool message missing tool_call_id:`, message);
       continue;
     }
     const output = resolveToolResultOutput(message.content);
     toolResults.push({ tool_call_id: toolCallId, output });
   }
 
-  console.log(`[DEBUG] Extracted toolResults:`, JSON.stringify(toolResults));
-
-  const lastMessageEntry = toolResults.length
-    ? messages.toReversed().find((message) => !isToolRole(message.role))
-    : messages[messages.length - 1];
+  const lastMessageEntry = messages[messages.length - 1];
   const lastMessage = lastMessageEntry?.content ?? "";
   const toolResultPrefix =
     toolResults.length > 0 || !lastMessageEntry ? "" : resolveToolResultPrefix(lastMessageEntry);
@@ -193,64 +194,64 @@ export async function handleChatCompletionProxyRequest(
       difyPayload.tool_choice = cached.tool_choice;
     }
   }
-  if (Array.isArray(lastMessage)) {
-    const textPart = lastMessage.find((p) => p.type === "text");
-    if (textPart?.text) {
-      difyPayload.query = toolResultPrefix
-        ? `${toolResultPrefix}\n${textPart.text}`
-        : textPart.text;
-    }
-
-    const imageParts = lastMessage.filter((p) => p.type === "image_url");
-    for (const img of imageParts) {
-      const url = img.image_url?.url;
-      if (!url) {
-        continue;
+  // Fix: If we have pending tool results, we should NOT use the last message as the query.
+  // The last message might be the original user query (resend) or just the tool output text.
+  // If we send both tool_results and a user query, Dify might treat it as a new turn and error out (400).
+  // We should let the subsequent logic auto-fill the query with tool outputs if needed.
+  if (toolResults.length === 0) {
+    if (Array.isArray(lastMessage)) {
+      const textPart = lastMessage.find((p) => p.type === "text");
+      if (textPart?.text) {
+        difyPayload.query = toolResultPrefix
+          ? `${toolResultPrefix}\n${textPart.text}`
+          : textPart.text;
       }
 
-      if (url.startsWith("http")) {
-        difyPayload.files.push({
-          type: "image",
-          transfer_method: "remote_url",
-          url: url,
-        });
-      } else {
-        try {
-          const fileId = await uploadToDify(url, params.apiKey, params.baseUrl, logger);
+      const imageParts = lastMessage.filter((p) => p.type === "image_url");
+      for (const img of imageParts) {
+        const url = img.image_url?.url;
+        if (!url) {
+          continue;
+        }
+
+        if (url.startsWith("http")) {
           difyPayload.files.push({
             type: "image",
-            transfer_method: "local_file",
-            upload_file_id: fileId,
+            transfer_method: "remote_url",
+            url: url,
           });
-        } catch {
-          // Ignore upload failures for now
+        } else {
+          try {
+            const fileId = await uploadToDify(url, params.apiKey, params.baseUrl, logger);
+            difyPayload.files.push({
+              type: "image",
+              transfer_method: "local_file",
+              upload_file_id: fileId,
+            });
+          } catch {
+            // Ignore upload failures for now
+          }
         }
       }
-    }
-  } else {
-    const textValue = String(lastMessage);
-    // Only set query from lastMessage if it's not empty, or if query is currently empty
-    // This prevents overwriting a query that might have been set by other logic (though currently none before this)
-    if (textValue || !difyPayload.query) {
-      difyPayload.query = toolResultPrefix ? `${toolResultPrefix}\n${textValue}` : textValue;
+    } else {
+      const textValue = String(lastMessage);
+      // Only set query from lastMessage if it's not empty, or if query is currently empty
+      // This prevents overwriting a query that might have been set by other logic (though currently none before this)
+      if (textValue || !difyPayload.query) {
+        difyPayload.query = toolResultPrefix ? `${toolResultPrefix}\n${textValue}` : textValue;
+      }
     }
   }
 
-  // Final check: If we have tool results but query is empty (because lastMessage was empty/null),
-  // use the tool outputs as the query.
+  // When tool_results are present, ALWAYS override query with a minimal placeholder.
+  // Dify sets query=None in the LLM node when external_tool_results exist (node.py L242-243),
+  // but the query is still saved as a user message in conversation history.
+  // Using a short placeholder avoids polluting history with redundant tool output text.
   if (toolResults.length > 0) {
     difyPayload.tool_results = toolResults;
-    if (!difyPayload.query || difyPayload.query.trim() === "") {
-      console.log(`[DEBUG] Query is empty, auto-filling with tool results...`);
-      const combinedOutput = toolResults
-        .map((r) => `[Tool Result: ${r.tool_call_id}] ${r.output}`)
-        .join("\n\n");
-      difyPayload.query = combinedOutput || ".";
-      console.log(`[DEBUG] Auto-filled query:`, difyPayload.query);
-    }
+    difyPayload.query = ".";
   } else if (!difyPayload.query) {
     difyPayload.query = ".";
-    console.log(`[DEBUG] Query empty (no tool results), filled with dot.`);
   }
 
   if (difyPayload.tools || typeof difyPayload.tool_choice !== "undefined") {
@@ -406,7 +407,7 @@ export async function handleChatCompletionProxyRequest(
 
                     // Only emit if we haven't seen this tool call or it has no args yet
                     // This avoids duplicating args if we receive full state after deltas
-                    if (!existing || !existing.argsString) {
+                    if (!existing || !existing.argsString || existing.argsString === "{}") {
                       shouldEmit = true;
                       argsToEmit = toolCall.argsString;
                     }
