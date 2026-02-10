@@ -111,22 +111,6 @@ export async function loadModelCatalog(params?: {
         modelCatalogPromise = null;
       }
 
-      // Inject Dify models
-      models.push({
-        id: "chat-flow",
-        name: "Dify ChatFlow",
-        provider: "dify",
-        contextWindow: 4096,
-        input: ["text", "image"],
-      });
-      models.push({
-        id: "agent",
-        name: "Dify Agent",
-        provider: "dify",
-        contextWindow: 4096,
-        input: ["text", "image"],
-      });
-
       return sortModels(models);
     } catch (error) {
       if (!hasLoggedModelCatalogError) {

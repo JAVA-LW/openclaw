@@ -8,6 +8,6 @@ export const parseCompositeKey = (compositeKey: string): DifyCompositeKey => {
   return {
     apiKey: parts[0] || "",
     baseUrl: parts[1] || "",
-    appType: (parts[2] || "chat") as "chat" | "agent",
+    appType: (parts[2] || "chat") as "chat",
   };
 };

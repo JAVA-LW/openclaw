@@ -80,7 +80,7 @@ export type ToolExecutorDeps = {
 export type DifyCompositeKey = {
   apiKey: string;
   baseUrl: string;
-  appType: "chat" | "agent";
+  appType: "chat";
 };
 
 export type ToolCallResult = {

@@ -39,13 +39,14 @@ export const difyAuthPlugin = {
             });
 
             // Ask for App Type
-            const appType = await ctx.prompter.select({
-              message: "Select App Type",
-              options: [
-                { value: "chat", label: "ChatFlow" },
-                { value: "agent", label: "Agent" },
-              ],
-            });
+            // const appType = await ctx.prompter.select({
+            //   message: "Select App Type",
+            //   options: [
+            //     { value: "chat", label: "ChatFlow" },
+            //     { value: "agent", label: "Agent" },
+            //   ],
+            // });
+            const appType = "chat";
 
             // Verify Key
             const progress = ctx.prompter.progress("Verifying Dify API Key...");
@@ -66,8 +67,8 @@ export const difyAuthPlugin = {
             const proxyUrl = `http://127.0.0.1:${gatewayPort}${PROXY_PATH}`;
 
             // Determine Model ID
-            const modelId = appType === "chat" ? "chat-flow" : "agent";
-            const defaultName = appType === "chat" ? "Dify ChatFlow" : "Dify Agent";
+            const modelId = "chat-flow";
+            const defaultName = "Dify ChatFlow";
 
             return {
               profiles: [
