@@ -78,4 +78,4 @@ memory/
 .agent/*.json
 !.agent/workflows/
 logs
-test/
+test
