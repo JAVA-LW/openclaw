@@ -65,7 +65,7 @@ export async function handleProxyRequest(req: IncomingMessage, res: ServerRespon
     return;
   }
 
-  console.log("[dify-auth] Request body:", body);
+  // console.log("[dify-auth] Request body:", body);
 
   const parsedBody = body as Record<string, unknown>;
   const userId = (typeof parsedBody?.user === "string" && parsedBody.user) || "openclaw-user";

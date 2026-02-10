@@ -304,7 +304,7 @@ export async function handleOpenResponsesProxyRequest(
   }
   if (toolResults.length > 0) {
     difyPayload.tool_results = toolResults;
-    console.log("[dify-auth] Sending tool_results to Dify:", JSON.stringify(toolResults, null, 2));
+    // console.log("[dify-auth] Sending tool_results to Dify:", JSON.stringify(toolResults, null, 2));
   }
   if (difyPayload.tools || typeof difyPayload.tool_choice !== "undefined") {
     const cached = toolCache.get(sessionKey);

@@ -376,7 +376,7 @@ export async function handleChatCompletionProxyRequest(
       const reader = difyRes.body?.getReader();
       const decoder = new TextDecoder();
       if (!reader) {
-        console.error("[dify-auth] No response body reader available");
+        // console.error("[dify-auth] No response body reader available");
         res.end();
         return;
       }

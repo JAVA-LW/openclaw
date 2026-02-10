@@ -5,14 +5,14 @@ import { fileURLToPath } from "url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const LOG_DIR = path.resolve(__dirname, "../logs");
 
-// Ensure log directory exists
-try {
-  if (!fs.existsSync(LOG_DIR)) {
-    fs.mkdirSync(LOG_DIR, { recursive: true });
-  }
-} catch (error) {
-  console.error("[DifyLogger] Failed to create log directory:", error);
-}
+// // Ensure log directory exists
+// try {
+//   if (!fs.existsSync(LOG_DIR)) {
+//     fs.mkdirSync(LOG_DIR, { recursive: true });
+//   }
+// } catch (error) {
+//   console.error("[DifyLogger] Failed to create log directory:", error);
+// }
 
 export class DifyLogger {
   private logFile: string;
@@ -25,6 +25,8 @@ export class DifyLogger {
   }
 
   log(section: string, data: any) {
+    return; // Logging disabled
+    /*
     try {
       // Use a regular function to access 'this' (the parent object)
       const replacer = function (this: any, key: string, value: any) {
@@ -67,5 +69,6 @@ export class DifyLogger {
     } catch (error) {
       console.error("[DifyLogger] Failed to write log:", error);
     }
+    */
   }
 }
