@@ -91,8 +91,8 @@ export const difyAuthPlugin = {
                         {
                           id: modelId,
                           name: siteInfo.title || defaultName,
-                          contextWindow: 32000,
-                          maxTokens: 4096,
+                          contextWindow: 128000,
+                          maxTokens: 8192,
                           reasoning: false,
                           input: ["text", "image"],
                           cost: {
