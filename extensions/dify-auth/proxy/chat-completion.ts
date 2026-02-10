@@ -32,6 +32,7 @@ export async function handleChatCompletionProxyRequest(
     baseUrl: string;
     appType: "chat" | "agent";
     body: unknown;
+    wasBusy?: boolean;
   },
 ) {
   const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -316,6 +317,25 @@ export async function handleChatCompletionProxyRequest(
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
 
+    if (params.wasBusy) {
+      res.write(
+        `data: ${JSON.stringify({
+          id: responseId,
+          object: "chat.completion.chunk",
+          created,
+          model: "dify-app",
+          choices: [
+            {
+              index: 0,
+              delta: { role: "assistant", content: "⏳ Processing...\n\n" },
+              finish_reason: null,
+            },
+          ],
+        })}\n\n`,
+      );
+      roleSent = true;
+    }
+
     while (loopCount < MAX_TOOL_LOOPS) {
       loopCount += 1;
 
@@ -576,21 +596,25 @@ export async function handleChatCompletionProxyRequest(
           conversationId,
           query: deferredSummary.slice(0, 120),
         });
-        fetch(`${params.baseUrl}/chat-messages`, {
-          method: "POST",
-          headers: {
-            [HEADER_AUTHORIZATION]: `Bearer ${params.apiKey}`,
-            [HEADER_CONTENT_TYPE]: "application/json",
-          },
-          body: JSON.stringify({
-            inputs: {},
-            query: deferredSummary,
-            response_mode: "blocking",
-            conversation_id: conversationId,
-            user: userId,
-            files: [],
-          }),
-        }).catch((err) => logger.log("Deferred summary flush error", err));
+        try {
+          await fetch(`${params.baseUrl}/chat-messages`, {
+            method: "POST",
+            headers: {
+              [HEADER_AUTHORIZATION]: `Bearer ${params.apiKey}`,
+              [HEADER_CONTENT_TYPE]: "application/json",
+            },
+            body: JSON.stringify({
+              inputs: {},
+              query: deferredSummary,
+              response_mode: "blocking",
+              conversation_id: conversationId,
+              user: userId,
+              files: [],
+            }),
+          });
+        } catch (err) {
+          logger.log("Deferred summary flush error", err);
+        }
       }
     }
 

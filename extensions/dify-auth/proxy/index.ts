@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { PROXY_PATH, OPEN_RESPONSES_PATHS } from "../constants.js";
 import { parseCompositeKey } from "../utils/auth.js";
+import { enqueue, isBusy } from "../utils/request-queue.js";
 import { handleChatCompletionProxyRequest } from "./chat-completion.js";
 import { handleOpenResponsesProxyRequest } from "./open-responses.js";
 
@@ -66,20 +67,28 @@ export async function handleProxyRequest(req: IncomingMessage, res: ServerRespon
 
   console.log("[dify-auth] Request body:", body);
 
-  if (isOpenResponsesPath(url.pathname)) {
-    await handleOpenResponsesProxyRequest(req, res, {
-      apiKey,
-      baseUrl,
-      appType,
-      body,
-    });
-    return;
-  }
+  const parsedBody = body as Record<string, unknown>;
+  const userId = (typeof parsedBody?.user === "string" && parsedBody.user) || "openclaw-user";
+  const sessionKey = `${apiKey}:${userId}`;
+  const wasBusy = isBusy(sessionKey);
 
-  await handleChatCompletionProxyRequest(req, res, {
-    apiKey,
-    baseUrl,
-    appType,
-    body,
+  await enqueue(sessionKey, async () => {
+    if (isOpenResponsesPath(url.pathname)) {
+      await handleOpenResponsesProxyRequest(req, res, {
+        apiKey,
+        baseUrl,
+        appType,
+        body,
+        wasBusy,
+      });
+    } else {
+      await handleChatCompletionProxyRequest(req, res, {
+        apiKey,
+        baseUrl,
+        appType,
+        body,
+        wasBusy,
+      });
+    }
   });
 }

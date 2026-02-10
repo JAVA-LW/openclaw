@@ -108,6 +108,7 @@ export async function handleOpenResponsesProxyRequest(
     baseUrl: string;
     appType: "chat" | "agent";
     body: unknown;
+    wasBusy?: boolean;
   },
 ) {
   const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -482,6 +483,16 @@ export async function handleOpenResponsesProxyRequest(
         content_index: 0,
         part: { type: "output_text", text: "" },
       });
+
+      if (params.wasBusy) {
+        writeOpenResponsesEvent(res, {
+          type: "response.output_text.delta",
+          item_id: outputItemId,
+          output_index: 0,
+          content_index: 0,
+          delta: "⏳ Processing...\n\n",
+        });
+      }
     }
 
     while (loopCount < MAX_TOOL_LOOPS) {
@@ -819,22 +830,25 @@ export async function handleOpenResponsesProxyRequest(
           conversationId,
           query: deferredSummary.slice(0, 120),
         });
-        // Fire-and-forget: send the summary as a regular query to Dify
-        fetch(`${params.baseUrl}/chat-messages`, {
-          method: "POST",
-          headers: {
-            [HEADER_AUTHORIZATION]: `Bearer ${params.apiKey}`,
-            [HEADER_CONTENT_TYPE]: "application/json",
-          },
-          body: JSON.stringify({
-            inputs: {},
-            query: deferredSummary,
-            response_mode: "blocking",
-            conversation_id: conversationId,
-            user: userId,
-            files: [],
-          }),
-        }).catch((err) => logger.log("Deferred summary flush error", err));
+        try {
+          await fetch(`${params.baseUrl}/chat-messages`, {
+            method: "POST",
+            headers: {
+              [HEADER_AUTHORIZATION]: `Bearer ${params.apiKey}`,
+              [HEADER_CONTENT_TYPE]: "application/json",
+            },
+            body: JSON.stringify({
+              inputs: {},
+              query: deferredSummary,
+              response_mode: "blocking",
+              conversation_id: conversationId,
+              user: userId,
+              files: [],
+            }),
+          });
+        } catch (err) {
+          logger.log("Deferred summary flush error", err);
+        }
       }
     }
 
