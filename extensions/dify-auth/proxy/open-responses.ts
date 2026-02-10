@@ -438,7 +438,7 @@ export async function handleOpenResponsesProxyRequest(
     return;
   }
 
-  console.log("[dify-auth] Request payload:", JSON.stringify(difyPayload, null, 2));
+  // console.log("[dify-auth] Request payload:", JSON.stringify(difyPayload, null, 2));
   logger.log("Constructed Dify Payload", difyPayload);
 
   try {
@@ -551,9 +551,9 @@ export async function handleOpenResponsesProxyRequest(
 
         // Debug: Monitor buffer fragmentation
         if (lines.length === 1 && buffer.length > 1000) {
-          console.warn(
-            `[dify-auth] Large SSE buffer detected without newline (${buffer.length} chars). Potential fragmentation issue.`,
-          );
+          // console.warn(
+          //   `[dify-auth] Large SSE buffer detected without newline (${buffer.length} chars). Potential fragmentation issue.`,
+          // );
         }
 
         buffer = lines.pop() || "";

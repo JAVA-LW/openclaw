@@ -622,7 +622,7 @@ export async function handleChatCompletionProxyRequest(
     res.end();
   } catch (err) {
     logger.log("Proxy Error", err);
-    console.error("[dify-auth] Proxy error:", err);
+    // console.error("[dify-auth] Proxy error:", err);
     res.statusCode = 500;
     res.end(String(err));
   }
