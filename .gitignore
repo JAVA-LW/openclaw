@@ -73,10 +73,7 @@ USER.md
 .serena/
 
 .idea/
-docs/taichuy/*
 # Agent credentials and memory (NEVER COMMIT)
 memory/
 .agent/*.json
 !.agent/workflows/
-extensions/dify-auth/logs
-extensions/dify-auth/test
