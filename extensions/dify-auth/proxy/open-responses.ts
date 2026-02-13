@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { DifyPayload, DifyResponseEvent } from "../dify/types.js";
-import { HEADER_AUTHORIZATION, HEADER_CONTENT_TYPE, MAX_TOOL_LOOPS } from "../constants.js";
+import { HEADER_AUTHORIZATION, HEADER_CONTENT_TYPE } from "../constants.js";
 import { uploadBase64ToDify } from "../dify/client.js";
 import { toolCache } from "../tools/cache.js";
 import { executeToolCalls } from "../tools/executor.js";
@@ -261,9 +261,19 @@ export async function handleOpenResponsesProxyRequest(
     sessionKey,
     conversationId: conversationId || "(empty)",
     hasToolResults: toolResults.length > 0,
+    toolResultCount: toolResults.length,
+    toolResultIds: toolResults.map((r) => r.tool_call_id),
+    messageItemCount: messageItems.length,
+    inputTextPartsCount: inputTextParts.length,
+    inputStringLen: inputString.length,
+    queryLen: query.length,
+    queryStart: typeof query === "string" ? query.slice(0, 80) : "",
   });
 
-  const isReset = typeof query === "string" && query.includes("A new session was started");
+  const isReset =
+    typeof query === "string" &&
+    query.includes("A new session was started") &&
+    toolResults.length === 0;
   if (isReset) {
     conversationId = "";
     deleteConversation(sessionKey);
@@ -509,7 +519,7 @@ export async function handleOpenResponsesProxyRequest(
       }
     }
 
-    while (loopCount < MAX_TOOL_LOOPS) {
+    while (true) {
       loopCount += 1;
 
       const requestOptions = {
@@ -595,7 +605,13 @@ export async function handleOpenResponsesProxyRequest(
 
             // Handle workflow_paused event: extract tool_calls for the client
             if (event === "workflow_paused") {
-              const pausedToolCalls = data.data?.tool_calls || [];
+              const reasons = data.data?.reasons || [];
+              const pausedToolCalls = reasons
+                .filter((r: Record<string, unknown>) => r.TYPE === "tool_call_pending")
+                .flatMap(
+                  (r: Record<string, unknown>) =>
+                    (r.tool_calls as Array<Record<string, unknown>>) || [],
+                );
               for (const tc of pausedToolCalls) {
                 if (!tc || !tc.id) continue;
                 lastToolCalls.push({
@@ -690,25 +706,6 @@ export async function handleOpenResponsesProxyRequest(
 
       lastToolCalls = Array.from(toolCallMap.values());
       if (autoToolLoop && lastToolCalls.length > 0) {
-        if (loopCount >= MAX_TOOL_LOOPS) {
-          const message = "Tool loop limit reached";
-          if (streamEnabled) {
-            const failed = createOpenResponsesResource({
-              id: responseId,
-              model,
-              status: "failed",
-              output: [],
-              error: { code: "tool_loop_limit", message },
-            });
-            writeOpenResponsesEvent(res, { type: "response.failed", response: failed });
-            res.write("data: [DONE]\n\n");
-            res.end();
-            return;
-          }
-          res.statusCode = 500;
-          res.end(message);
-          return;
-        }
         const toolResults = await executeToolCalls({
           req,
           model: payload.model,

@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { DifyPayload } from "../dify/types";
-import { HEADER_AUTHORIZATION, HEADER_CONTENT_TYPE, MAX_TOOL_LOOPS } from "../constants";
+import { HEADER_AUTHORIZATION, HEADER_CONTENT_TYPE } from "../constants";
 import { uploadToDify } from "../dify/client";
 import { toolCache } from "../tools/cache";
 import { executeToolCalls } from "../tools/executor";
@@ -158,10 +158,17 @@ export async function handleChatCompletionProxyRequest(
     sessionKey,
     conversationId: conversationId || "(empty)",
     hasToolResults: toolResults.length > 0,
+    toolResultCount: toolResults.length,
+    toolResultIds: toolResults.map((r) => r.tool_call_id),
+    messageCount: messages.length,
+    messageRoles: messages.map((m: any) => m?.role),
+    lastMessageRole: lastMessageEntry?.role,
   });
 
   const isReset =
-    typeof lastMessage === "string" && lastMessage.includes("A new session was started");
+    typeof lastMessage === "string" &&
+    lastMessage.includes("A new session was started") &&
+    toolResults.length === 0;
   if (isReset) {
     conversationId = "";
     deleteConversation(sessionKey);
@@ -346,7 +353,7 @@ export async function handleChatCompletionProxyRequest(
       roleSent = true;
     }
 
-    while (loopCount < MAX_TOOL_LOOPS) {
+    while (true) {
       loopCount += 1;
 
       const requestOptions = {
@@ -424,7 +431,13 @@ export async function handleChatCompletionProxyRequest(
 
               // Handle workflow_paused event: extract tool_calls and emit as OpenAI format
               if (event === "workflow_paused") {
-                const pausedToolCalls = data.data?.tool_calls || [];
+                const reasons = data.data?.reasons || [];
+                const pausedToolCalls = reasons
+                  .filter((r: Record<string, unknown>) => r.TYPE === "tool_call_pending")
+                  .flatMap(
+                    (r: Record<string, unknown>) =>
+                      (r.tool_calls as Array<Record<string, unknown>>) || [],
+                  );
                 for (let idx = 0; idx < pausedToolCalls.length; idx++) {
                   const tc = pausedToolCalls[idx];
                   if (!tc || !tc.id) continue;
@@ -579,24 +592,6 @@ export async function handleChatCompletionProxyRequest(
       const pendingToolCalls = Array.from(toolCallMap.values());
       lastHadToolCalls = pendingToolCalls.length > 0;
       if (autoToolLoop && pendingToolCalls.length > 0) {
-        if (loopCount >= MAX_TOOL_LOOPS) {
-          res.write(
-            `data: ${JSON.stringify({
-              id: responseId,
-              object: "chat.completion.chunk",
-              created,
-              model: "dify-app",
-              choices: [
-                {
-                  index: 0,
-                  delta: { content: "Tool loop limit reached" },
-                  finish_reason: "stop",
-                },
-              ],
-            })}\n\n`,
-          );
-          break;
-        }
         const toolResults = await executeToolCalls({
           req,
           model: chatBody.model,

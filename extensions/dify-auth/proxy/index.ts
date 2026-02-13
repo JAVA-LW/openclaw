@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { PROXY_PATH, OPEN_RESPONSES_PATHS } from "../constants.js";
 import { parseCompositeKey } from "../utils/auth.js";
+import { DifyLogger } from "../utils/logger.js";
 import { enqueue, isBusy } from "../utils/request-queue.js";
 import { handleChatCompletionProxyRequest } from "./chat-completion.js";
 import { handleOpenResponsesProxyRequest } from "./open-responses.js";
@@ -65,7 +66,22 @@ export async function handleProxyRequest(req: IncomingMessage, res: ServerRespon
     return;
   }
 
-  // console.log("[dify-auth] Request body:", body);
+  // DEBUG: Log request structure to identify how OpenClaw sends tool results
+  const debugBody = body as Record<string, unknown>;
+  const debugMessages = Array.isArray(debugBody.messages) ? debugBody.messages : null;
+  const debugInput = debugBody.input;
+  const debugLogger = new DifyLogger("request-debug");
+  debugLogger.log("REQUEST DEBUG", {
+    path: url.pathname,
+    isOpenResponses: isOpenResponsesPath(url.pathname),
+    hasMessages: !!debugMessages,
+    messageCount: debugMessages?.length,
+    messageRoles: debugMessages?.map((m: any) => m.role),
+    inputType: typeof debugInput,
+    inputIsArray: Array.isArray(debugInput),
+    inputItemTypes: Array.isArray(debugInput) ? debugInput.map((i: any) => i?.type) : null,
+    hasToolResults: Array.isArray(debugBody.tool_results),
+  });
 
   const parsedBody = body as Record<string, unknown>;
   const userId = (typeof parsedBody?.user === "string" && parsedBody.user) || "openclaw-user";
