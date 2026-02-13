@@ -257,6 +257,11 @@ export async function handleOpenResponsesProxyRequest(
   const now = Date.now();
   pruneConversationMap(now);
   let conversationId = getConversationId(sessionKey, now);
+  logger.log("request start", {
+    sessionKey,
+    conversationId: conversationId || "(empty)",
+    hasToolResults: toolResults.length > 0,
+  });
 
   const isReset = typeof query === "string" && query.includes("A new session was started");
   if (isReset) {
@@ -281,6 +286,9 @@ export async function handleOpenResponsesProxyRequest(
     user: userId,
     files: [],
   };
+
+  // Always set structured mode to enable pause/resume for multi-node ChatFlow workflows.
+  difyPayload.tool_call_mode = "structured";
 
   const normalizedTools = normalizeToolDefinitions(payload.tools);
   if (normalizedTools) {
@@ -439,7 +447,13 @@ export async function handleOpenResponsesProxyRequest(
   }
 
   // console.log("[dify-auth] Request payload:", JSON.stringify(difyPayload, null, 2));
-  logger.log("Constructed Dify Payload", difyPayload);
+  logger.log("Dify Payload", {
+    conversation_id: difyPayload.conversation_id || "(empty)",
+    tool_call_mode: difyPayload.tool_call_mode,
+    tool_results_count: difyPayload.tool_results?.length ?? 0,
+    tools_count: difyPayload.tools?.length ?? 0,
+    query_length: difyPayload.query?.length ?? 0,
+  });
 
   try {
     const endpoint = "/chat-messages";
@@ -509,16 +523,14 @@ export async function handleOpenResponsesProxyRequest(
 
       logger.log(`Dify Request (Loop ${loopCount})`, {
         url: `${params.baseUrl}${endpoint}`,
-        ...requestOptions,
-        body: currentPayload,
+        conversation_id: currentPayload.conversation_id || "(empty)",
+        tool_results_count: currentPayload.tool_results?.length ?? 0,
       });
 
       const difyRes = await fetch(`${params.baseUrl}${endpoint}`, requestOptions);
 
-      logger.log(`Dify Response Status (Loop ${loopCount})`, {
+      logger.log(`Dify Response (Loop ${loopCount})`, {
         status: difyRes.status,
-        statusText: difyRes.statusText,
-        headers: Object.fromEntries(difyRes.headers.entries()),
       });
 
       if (!difyRes.ok) {
@@ -563,20 +575,37 @@ export async function handleOpenResponsesProxyRequest(
             continue;
           }
 
-          logger.log("Dify SSE Line", line);
-
+          // Log SSE event type only (reduce noise)
           if (!line.startsWith("data: ")) {
             continue;
           }
           try {
             const data = JSON.parse(line.slice(6));
+            const event = typeof data.event === "string" ? data.event : "";
+            logger.log("SSE", { event, conversation_id: data.conversation_id || null });
 
             if (data.conversation_id) {
               setConversationId(sessionKey, data.conversation_id, Date.now());
               conversationId = data.conversation_id;
+              logger.log("captured conversation_id", {
+                event: data.event,
+                conversation_id: data.conversation_id,
+              });
             }
 
-            const event = typeof data.event === "string" ? data.event : "";
+            // Handle workflow_paused event: extract tool_calls for the client
+            if (event === "workflow_paused") {
+              const pausedToolCalls = data.data?.tool_calls || [];
+              for (const tc of pausedToolCalls) {
+                if (!tc || !tc.id) continue;
+                lastToolCalls.push({
+                  callId: tc.id,
+                  name: tc.function?.name || "",
+                  args: tc.function?.arguments || "{}",
+                });
+              }
+              continue;
+            }
 
             if (event === "message" || event === "agent_message") {
               const content = typeof data.answer === "string" ? data.answer : "";

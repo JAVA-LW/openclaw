@@ -154,6 +154,11 @@ export async function handleChatCompletionProxyRequest(
   const now = Date.now();
   pruneConversationMap(now);
   let conversationId = getConversationId(sessionKey, now);
+  logger.log("request start", {
+    sessionKey,
+    conversationId: conversationId || "(empty)",
+    hasToolResults: toolResults.length > 0,
+  });
 
   const isReset =
     typeof lastMessage === "string" && lastMessage.includes("A new session was started");
@@ -172,9 +177,8 @@ export async function handleChatCompletionProxyRequest(
     files: [],
   };
 
-  // Ensure tool call mode is always handled by Dify's native capabilities
-  // We do not set 'openclaw_text' or other legacy modes here.
-  // difyPayload.tool_call_mode = "structured"; // Optional: explicit native mode if needed
+  // Always set structured mode to enable pause/resume for multi-node ChatFlow workflows.
+  difyPayload.tool_call_mode = "structured";
 
   const normalizedTools = normalizeToolDefinitions(chatBody.tools);
   if (normalizedTools) {
@@ -270,7 +274,13 @@ export async function handleChatCompletionProxyRequest(
     difyPayload.query = `${systemMessage}\n\n${difyPayload.query}`;
   }
 
-  logger.log("Constructed Dify Payload", difyPayload);
+  logger.log("Dify Payload", {
+    conversation_id: difyPayload.conversation_id || "(empty)",
+    tool_call_mode: difyPayload.tool_call_mode,
+    tool_results_count: difyPayload.tool_results?.length ?? 0,
+    tools_count: difyPayload.tools?.length ?? 0,
+    query_length: difyPayload.query?.length ?? 0,
+  });
 
   // Intercept openclaw compaction/summary requests — these should never be
   // forwarded to Dify because they can arrive while the last assistant message
@@ -350,19 +360,14 @@ export async function handleChatCompletionProxyRequest(
 
       logger.log(`Dify Request (Loop ${loopCount})`, {
         url: `${params.baseUrl}${endpoint}`,
-        ...requestOptions,
-        // Body is already in requestOptions as string, but we want object for readability.
-        // To avoid duplication and huge logs, we only log the object version if it's different from the initial payload
-        // or if it's a subsequent loop.
-        parsedBody: currentPayload,
+        conversation_id: currentPayload.conversation_id || "(empty)",
+        tool_results_count: currentPayload.tool_results?.length ?? 0,
       });
 
       const difyRes = await fetch(`${params.baseUrl}${endpoint}`, requestOptions);
 
-      logger.log(`Dify Response Status (Loop ${loopCount})`, {
+      logger.log(`Dify Response (Loop ${loopCount})`, {
         status: difyRes.status,
-        statusText: difyRes.statusText,
-        headers: Object.fromEntries(difyRes.headers.entries()),
       });
 
       if (!difyRes.ok) {
@@ -401,18 +406,64 @@ export async function handleChatCompletionProxyRequest(
             continue;
           }
 
-          logger.log("Dify SSE Line", line);
-
+          // Log SSE event type only (reduce noise)
           if (line.startsWith("data: ")) {
             try {
               const data = JSON.parse(line.slice(6));
+              const event = typeof data.event === "string" ? data.event : "";
+              logger.log("SSE", { event, conversation_id: data.conversation_id || null });
 
               if (data.conversation_id) {
                 setConversationId(sessionKey, data.conversation_id, Date.now());
                 conversationId = data.conversation_id;
+                logger.log("captured conversation_id", {
+                  event: data.event,
+                  conversation_id: data.conversation_id,
+                });
               }
 
-              const event = typeof data.event === "string" ? data.event : "";
+              // Handle workflow_paused event: extract tool_calls and emit as OpenAI format
+              if (event === "workflow_paused") {
+                const pausedToolCalls = data.data?.tool_calls || [];
+                for (let idx = 0; idx < pausedToolCalls.length; idx++) {
+                  const tc = pausedToolCalls[idx];
+                  if (!tc || !tc.id) continue;
+                  toolCallMap.set(tc.id, {
+                    callId: tc.id,
+                    toolName: tc.function?.name || "",
+                    argsString: tc.function?.arguments || "{}",
+                  });
+                  const chunk = {
+                    id: responseId,
+                    object: "chat.completion.chunk",
+                    created,
+                    model: "dify-app",
+                    choices: [
+                      {
+                        index: 0,
+                        delta: {
+                          ...(roleSent ? {} : { role: "assistant" }),
+                          tool_calls: [
+                            {
+                              index: idx,
+                              id: tc.id,
+                              type: "function",
+                              function: {
+                                name: tc.function?.name || "",
+                                arguments: tc.function?.arguments || "{}",
+                              },
+                            },
+                          ],
+                        },
+                        finish_reason: null,
+                      },
+                    ],
+                  };
+                  roleSent = true;
+                  res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+                }
+                continue;
+              }
 
               if (event === "message" || event === "agent_message") {
                 // Keep track of answer content if needed, but we don't parse text tools anymore

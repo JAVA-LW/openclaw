@@ -34,4 +34,11 @@ export type DifyResponseEvent = {
   arguments?: string;
   tool_calls?: unknown;
   toolCalls?: unknown;
+  // workflow_paused event fields
+  data?: {
+    task_id?: string;
+    workflow_run_id?: string;
+    tool_calls?: Array<{ id: string; type: string; function: { name: string; arguments: string } }>;
+    reasons?: unknown[];
+  };
 };
